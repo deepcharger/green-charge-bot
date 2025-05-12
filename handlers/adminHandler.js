@@ -2,381 +2,460 @@ const Session = require('../models/session');
 const Queue = require('../models/queue');
 const System = require('../models/system');
 const User = require('../models/user');
+const userHandler = require('./userHandler');
+const queueHandler = require('./queueHandler');
+const sessionHandler = require('./sessionHandler');
 const config = require('../config');
-const moment = require('moment');
 const logger = require('../utils/logger');
 
 /**
- * Richiede uno slot di ricarica
- * @param {Number} userId - ID Telegram dell'utente
- * @param {String} username - Username Telegram dell'utente
- * @returns {Promise<Object>} - Oggetto risultato con stato e messaggio
+ * Gestisce i comandi admin
+ * @param {Object} bot - Istanza del bot Telegram
+ * @param {Number} chatId - ID della chat
+ * @param {Number} userId - ID Telegram dell'amministratore
+ * @param {String} command - Comando da eseguire
+ * @param {String} fullText - Testo completo del messaggio
+ * @returns {Promise<void>}
  */
-async function requestCharge(userId, username) {
+async function handleAdminCommand(bot, chatId, userId, command, fullText) {
   try {
-    // Controlla se l'utente è già in una sessione attiva
-    const activeSession = await Session.findOne({ 
-      telegram_id: userId, 
-      status: 'active' 
-    });
-    
-    if (activeSession) {
-      throw new Error('Hai già una sessione di ricarica attiva.');
+    // Verifica che l'utente sia effettivamente admin
+    if (userId !== config.ADMIN_USER_ID) {
+      bot.sendMessage(chatId, 'Comando riservato agli amministratori.');
+      return;
     }
     
-    // Controlla se l'utente è già in coda
-    const inQueue = await Queue.findOne({ telegram_id: userId });
-    if (inQueue) {
-      return {
-        slotAvailable: false,
-        position: inQueue.position,
-        message: 'Sei già in coda.'
-      };
-    }
+    const params = fullText.split(' ').slice(1);
     
-    // Ottieni lo stato del sistema
-    let system = await System.findOne({ name: 'system' });
-    if (!system) {
-      // Inizializza il sistema se non esiste
-      system = new System();
-      await system.save();
+    switch (command) {
+      case 'status':
+        await handleAdminStatus(bot, chatId);
+        break;
+        
+      case 'stats':
+        await handleAdminStats(bot, chatId);
+        break;
+        
+      case 'reset_slot':
+        if (params.length < 1) {
+          bot.sendMessage(chatId, 'Uso: /admin_reset_slot @username');
+          return;
+        }
+        await handleResetSlot(bot, chatId, params[0]);
+        break;
+        
+      case 'remove_queue':
+        if (params.length < 1) {
+          bot.sendMessage(chatId, 'Uso: /admin_remove_queue @username');
+          return;
+        }
+        await handleRemoveFromQueue(bot, chatId, params[0]);
+        break;
+        
+      case 'set_max_slots':
+        if (params.length < 1 || isNaN(parseInt(params[0]))) {
+          bot.sendMessage(chatId, 'Uso: /admin_set_max_slots [numero]');
+          return;
+        }
+        await handleSetMaxSlots(bot, chatId, parseInt(params[0]));
+        break;
+        
+      case 'notify_all':
+        if (params.length < 1) {
+          bot.sendMessage(chatId, 'Uso: /admin_notify_all [messaggio]');
+          return;
+        }
+        await handleNotifyAll(bot, chatId, params.join(' '));
+        break;
+        
+      case 'reset_system':
+        await handleResetSystem(bot, chatId);
+        break;
+        
+      case 'help':
+        await handleAdminHelp(bot, chatId);
+        break;
+        
+      default:
+        bot.sendMessage(chatId, 
+          'Comando admin non riconosciuto. Usa /admin_help per la lista dei comandi disponibili.');
     }
+  } catch (error) {
+    logger.error(`Admin command error (${command}):`, error);
+    bot.sendMessage(chatId, `Errore durante l'esecuzione del comando: ${error.message}`);
+  }
+}
+
+/**
+ * Gestisce il comando admin_status
+ * @param {Object} bot - Istanza del bot Telegram
+ * @param {Number} chatId - ID della chat
+ * @returns {Promise<void>}
+ */
+async function handleAdminStatus(bot, chatId) {
+  try {
+    const status = await queueHandler.getSystemStatus();
     
-    // Controlla se ci sono slot disponibili
-    if (system.slots_available > 0) {
-      return {
-        slotAvailable: true,
-        message: 'Slot disponibile. Puoi procedere con la ricarica.'
-      };
-    } else {
-      // Aggiungi l'utente alla coda
-      const position = system.queue_length + 1;
-      
-      const queueEntry = new Queue({
-        telegram_id: userId,
-        username,
-        position
+    let message = `[ADMIN] Stato dettagliato del sistema:\n`;
+    message += `- Slot totali: ${status.total_slots}\n`;
+    message += `- Slot occupati: ${status.slots_occupied}/${status.total_slots}\n`;
+    message += `- Slot disponibili: ${status.slots_available}\n`;
+    message += `- Utenti in coda: ${status.queue_length}\n\n`;
+    
+    if (status.active_sessions.length > 0) {
+      message += `Utenti attualmente in ricarica:\n`;
+      status.active_sessions.forEach((session, index) => {
+        message += `${index + 1}. @${session.username} (ID: ${session.telegram_id}) - ` +
+                   `Slot ${session.slot_number}, ` +
+                   `iniziato alle ${formatTime(session.start_time)}, ` +
+                   `termina alle ${formatTime(session.end_time)} ` +
+                   `(tra ${session.remaining_minutes} min)\n`;
       });
-      
-      await queueEntry.save();
-      
-      // Aggiorna la lunghezza della coda nel sistema
-      system.queue_length = position;
-      await system.save();
-      
-      return {
-        slotAvailable: false,
-        position,
-        message: 'Tutti gli slot sono occupati. Sei stato aggiunto alla coda.'
-      };
-    }
-  } catch (error) {
-    logger.error('Error in requestCharge:', error);
-    throw error;
-  }
-}
-
-/**
- * Ottiene gli utenti in coda
- * @returns {Promise<Array>} - Array di utenti in coda
- */
-async function getQueuedUsers() {
-  try {
-    return await Queue.find().sort({ position: 1 });
-  } catch (error) {
-    logger.error('Error getting queued users:', error);
-    throw error;
-  }
-}
-
-/**
- * Ottiene un utente in coda per posizione
- * @param {Number} position - Posizione in coda
- * @returns {Promise<Object|null>} - Oggetto utente in coda o null se non trovato
- */
-async function getUserByPosition(position) {
-  try {
-    return await Queue.findOne({ position });
-  } catch (error) {
-    logger.error(`Error getting user at position ${position}:`, error);
-    throw error;
-  }
-}
-
-/**
- * Ottiene il prossimo utente in coda
- * @returns {Promise<Object|null>} - Oggetto utente in coda o null se non ce ne sono
- */
-async function getNextInQueue() {
-  try {
-    return await Queue.findOne().sort({ position: 1 });
-  } catch (error) {
-    logger.error('Error getting next user in queue:', error);
-    throw error;
-  }
-}
-
-/**
- * Rimuove un utente dalla coda
- * @param {Number} userId - ID Telegram dell'utente
- * @returns {Promise<Object|null>} - Oggetto utente rimosso o null se non trovato
- */
-async function removeFromQueue(userId) {
-  try {
-    // Trova l'utente in coda
-    const queuedUser = await Queue.findOne({ telegram_id: userId });
-    
-    if (!queuedUser) {
-      return null;
+    } else {
+      message += `Nessun utente attualmente in ricarica.\n`;
     }
     
-    const position = queuedUser.position;
+    message += `\n`;
     
-    // Rimuovi l'utente dalla coda
-    await Queue.deleteOne({ telegram_id: userId });
+    if (status.queue.length > 0) {
+      message += `Utenti in coda:\n`;
+      status.queue.forEach((user, index) => {
+        message += `${index + 1}. @${user.username} (ID: ${user.telegram_id}) - ` +
+                   `Posizione #${user.position}, ` +
+                   `in attesa da ${formatTimeDiff(user.request_time)}\n`;
+      });
+    } else {
+      message += `Nessun utente in coda.`;
+    }
     
-    // Aggiorna le posizioni degli altri utenti in coda
-    await Queue.updateMany(
-      { position: { $gt: position } },
-      { $inc: { position: -1 } }
-    );
+    bot.sendMessage(chatId, message);
+  } catch (error) {
+    logger.error('Admin status error:', error);
+    bot.sendMessage(chatId, `Errore durante il recupero dello stato: ${error.message}`);
+  }
+}
+
+/**
+ * Gestisce il comando admin_stats
+ * @param {Object} bot - Istanza del bot Telegram
+ * @param {Number} chatId - ID della chat
+ * @returns {Promise<void>}
+ */
+async function handleAdminStats(bot, chatId) {
+  try {
+    const stats = await queueHandler.getSystemStats();
     
-    // Aggiorna la lunghezza della coda nel sistema
+    let message = `[ADMIN] Statistiche del sistema:\n\n`;
+    message += `Statistiche generali:\n`;
+    message += `- Ricariche totali completate: ${stats.total_charges_completed}\n`;
+    message += `- Ricariche completate oggi: ${stats.charges_today}\n`;
+    message += `- Tempo medio di ricarica: ${stats.avg_charge_time} minuti\n\n`;
+    
+    message += `Statistiche utenti:\n`;
+    message += `- Utenti totali registrati: ${stats.total_users}\n`;
+    message += `- Utenti attivi negli ultimi 30 giorni: ${stats.active_users}\n\n`;
+    
+    message += `Stato attuale:\n`;
+    message += `- Slot totali: ${stats.total_slots}\n`;
+    message += `- Slot occupati: ${stats.current_status.slots_occupied}/${stats.total_slots}\n`;
+    message += `- Slot disponibili: ${stats.current_status.slots_available}\n`;
+    message += `- Utenti in coda: ${stats.current_status.queue_length}`;
+    
+    bot.sendMessage(chatId, message);
+  } catch (error) {
+    logger.error('Admin stats error:', error);
+    bot.sendMessage(chatId, `Errore durante il recupero delle statistiche: ${error.message}`);
+  }
+}
+
+/**
+ * Gestisce il comando admin_reset_slot
+ * @param {Object} bot - Istanza del bot Telegram
+ * @param {Number} chatId - ID della chat
+ * @param {String} username - Username Telegram dell'utente
+ * @returns {Promise<void>}
+ */
+async function handleResetSlot(bot, chatId, username) {
+  try {
+    // Pulisci lo username da eventuali @
+    username = username.replace('@', '');
+    
+    // Trova l'utente
+    const user = await User.findOne({ username });
+    
+    if (!user) {
+      bot.sendMessage(chatId, `Utente @${username} non trovato.`);
+      return;
+    }
+    
+    // Trova e termina la sessione attiva
+    const result = await sessionHandler.endSession(user.telegram_id, 'admin_terminated');
+    
+    if (!result || !result.session) {
+      bot.sendMessage(chatId, `Utente @${username} non ha sessioni attive.`);
+      return;
+    }
+    
+    // Notifica l'utente
+    bot.sendMessage(user.telegram_id, 
+      `La tua sessione di ricarica è stata terminata da un amministratore.\n` +
+      `Durata: ${result.durationMinutes} minuti.`);
+    
+    // Notifica l'admin
+    bot.sendMessage(chatId, 
+      `Slot di @${username} (ID: ${user.telegram_id}) è stato resettato.\n` +
+      `Durata della sessione: ${result.durationMinutes} minuti.\n` +
+      `È stato inviato un avviso al prossimo utente in coda.`);
+    
+    // Notifica il prossimo utente in coda
+    await queueHandler.notifyNextInQueue(bot);
+  } catch (error) {
+    logger.error(`Admin reset slot error for ${username}:`, error);
+    bot.sendMessage(chatId, `Errore durante il reset dello slot: ${error.message}`);
+  }
+}
+
+/**
+ * Gestisce il comando admin_remove_queue
+ * @param {Object} bot - Istanza del bot Telegram
+ * @param {Number} chatId - ID della chat
+ * @param {String} username - Username Telegram dell'utente
+ * @returns {Promise<void>}
+ */
+async function handleRemoveFromQueue(bot, chatId, username) {
+  try {
+    // Pulisci lo username da eventuali @
+    username = username.replace('@', '');
+    
+    // Rimuovi dalla coda
+    const result = await queueHandler.adminRemoveFromQueue(username);
+    
+    if (!result) {
+      bot.sendMessage(chatId, `Utente @${username} non trovato in coda.`);
+      return;
+    }
+    
+    // Notifica l'utente
+    bot.sendMessage(result.telegram_id, 
+      `Sei stato rimosso dalla coda da un amministratore.\n` +
+      `Eri in posizione #${result.position}.`);
+    
+    // Notifica l'admin
+    bot.sendMessage(chatId, 
+      `@${username} (ID: ${result.telegram_id}) è stato rimosso dalla coda.\n` +
+      `Era in posizione #${result.position}.`);
+  } catch (error) {
+    logger.error(`Admin remove from queue error for ${username}:`, error);
+    bot.sendMessage(chatId, `Errore durante la rimozione dalla coda: ${error.message}`);
+  }
+}
+
+/**
+ * Gestisce il comando admin_set_max_slots
+ * @param {Object} bot - Istanza del bot Telegram
+ * @param {Number} chatId - ID della chat
+ * @param {Number} maxSlots - Nuovo numero massimo di slot
+ * @returns {Promise<void>}
+ */
+async function handleSetMaxSlots(bot, chatId, maxSlots) {
+  try {
+    if (maxSlots < 1) {
+      bot.sendMessage(chatId, 'Il numero di slot deve essere almeno 1.');
+      return;
+    }
+    
+    // Aggiorna il numero massimo di slot
+    const system = await queueHandler.updateMaxSlots(maxSlots);
+    
+    // Notifica l'admin
+    bot.sendMessage(chatId, 
+      `Numero massimo di slot aggiornato a ${maxSlots}.\n` +
+      `Stato attuale: ${system.slots_available} slot disponibili.`);
+    
+    // Se sono stati aggiunti nuovi slot disponibili, notifica gli utenti in coda
+    if (system.slots_available > 0) {
+      await queueHandler.notifyNextInQueue(bot);
+    }
+  } catch (error) {
+    logger.error(`Admin set max slots error (${maxSlots}):`, error);
+    bot.sendMessage(chatId, `Errore durante l'aggiornamento del numero massimo di slot: ${error.message}`);
+  }
+}
+
+/**
+ * Gestisce il comando admin_notify_all
+ * @param {Object} bot - Istanza del bot Telegram
+ * @param {Number} chatId - ID della chat
+ * @param {String} message - Messaggio da inviare a tutti gli utenti
+ * @returns {Promise<void>}
+ */
+async function handleNotifyAll(bot, chatId, message) {
+  try {
+    // Ottieni tutti gli utenti
+    const users = await userHandler.getUsers();
+    
+    if (users.length === 0) {
+      bot.sendMessage(chatId, 'Nessun utente registrato.');
+      return;
+    }
+    
+    let successCount = 0;
+    let errorCount = 0;
+    
+    // Invia il messaggio a tutti gli utenti
+    for (const user of users) {
+      try {
+        await bot.sendMessage(
+          user.telegram_id,
+          `📢 ANNUNCIO AMMINISTRATORE 📢\n\n${message}`
+        );
+        successCount++;
+      } catch (error) {
+        logger.error(`Error sending message to user ${user.telegram_id}:`, error);
+        errorCount++;
+      }
+    }
+    
+    // Notifica l'admin
+    bot.sendMessage(chatId, 
+      `Messaggio inviato a ${successCount} utenti.\n` +
+      `Errori: ${errorCount}`);
+  } catch (error) {
+    logger.error('Admin notify all error:', error);
+    bot.sendMessage(chatId, `Errore durante l'invio del messaggio: ${error.message}`);
+  }
+}
+
+/**
+ * Gestisce il comando admin_reset_system
+ * @param {Object} bot - Istanza del bot Telegram
+ * @param {Number} chatId - ID della chat
+ * @returns {Promise<void>}
+ */
+async function handleResetSystem(bot, chatId) {
+  try {
+    // Chiedi conferma
+    bot.sendMessage(chatId, 
+      `⚠️ ATTENZIONE ⚠️\n\n` +
+      `Stai per resettare completamente il sistema, terminando tutte le sessioni attive e svuotando la coda.\n\n` +
+      `Questa operazione non può essere annullata.\n\n` +
+      `Per confermare, rispondi con /admin_confirm_reset`);
+      
+    // La conferma dovrà essere gestita come un comando separato
+  } catch (error) {
+    logger.error('Admin reset system error:', error);
+    bot.sendMessage(chatId, `Errore durante il reset del sistema: ${error.message}`);
+  }
+}
+
+/**
+ * Gestisce il comando admin_confirm_reset
+ * @param {Object} bot - Istanza del bot Telegram
+ * @param {Number} chatId - ID della chat
+ * @returns {Promise<void>}
+ */
+async function handleConfirmReset(bot, chatId) {
+  try {
+    // Ottieni tutte le sessioni attive
+    const activeSessions = await Session.find({ status: 'active' });
+    
+    // Termina tutte le sessioni attive
+    for (const session of activeSessions) {
+      await sessionHandler.endSession(session.telegram_id, 'admin_terminated');
+      
+      // Notifica l'utente
+      bot.sendMessage(session.telegram_id, 
+        `La tua sessione di ricarica è stata terminata a causa di un reset del sistema.\n` +
+        `Il sistema è stato resettato da un amministratore.`);
+    }
+    
+    // Ottieni tutti gli utenti in coda
+    const queuedUsers = await Queue.find();
+    
+    // Svuota la coda
+    await Queue.deleteMany({});
+    
+    // Notifica gli utenti in coda
+    for (const user of queuedUsers) {
+      bot.sendMessage(user.telegram_id, 
+        `Sei stato rimosso dalla coda a causa di un reset del sistema.\n` +
+        `Il sistema è stato resettato da un amministratore.`);
+    }
+    
+    // Resetta lo stato del sistema
     const system = await System.findOne({ name: 'system' });
     if (system) {
-      system.queue_length = Math.max(0, system.queue_length - 1);
+      system.slots_available = system.total_slots;
+      system.active_sessions = [];
+      system.queue_length = 0;
       await system.save();
     }
     
-    logger.info(`User ${userId} removed from queue at position ${position}`);
-    
-    return queuedUser;
+    // Notifica l'admin
+    bot.sendMessage(chatId, 
+      `Sistema resettato con successo.\n` +
+      `- ${activeSessions.length} sessioni attive terminate\n` +
+      `- ${queuedUsers.length} utenti rimossi dalla coda\n` +
+      `- ${system ? system.total_slots : 5} slot disponibili`);
   } catch (error) {
-    logger.error(`Error removing user ${userId} from queue:`, error);
-    throw error;
+    logger.error('Admin confirm reset error:', error);
+    bot.sendMessage(chatId, `Errore durante il reset del sistema: ${error.message}`);
   }
 }
 
 /**
- * Notifica il prossimo utente in coda
+ * Gestisce il comando admin_help
  * @param {Object} bot - Istanza del bot Telegram
- * @returns {Promise<Object|null>} - Oggetto utente notificato o null se nessuno in coda
+ * @param {Number} chatId - ID della chat
+ * @returns {Promise<void>}
  */
-async function notifyNextInQueue(bot) {
-  try {
-    // Verifica se ci sono slot disponibili
-    const system = await System.findOne({ name: 'system' });
-    
-    if (!system || system.slots_available <= 0) {
-      return null;
-    }
-    
-    // Trova il prossimo utente in coda
-    const nextUser = await getNextInQueue();
-    
-    if (!nextUser) {
-      return null;
-    }
-    
-    // Rimuovi l'utente dalla coda
-    await removeFromQueue(nextUser.telegram_id);
-    
-    // Se il bot è disponibile, invia una notifica
-    if (bot) {
-      bot.sendMessage(
-        nextUser.telegram_id,
-        `@${nextUser.username} (ID: ${nextUser.telegram_id}), si è liberato uno slot! È il tuo turno.\n` +
-        `Puoi procedere con la ricarica tramite l'app Antonio Green-Charge.\n` +
-        `Ricorda che hai a disposizione massimo ${config.MAX_CHARGE_TIME} minuti.\n` +
-        `Conferma l'inizio della ricarica con /iniziato quando attivi la colonnina.`
-      );
-      
-      logger.info(`Notified user ${nextUser.username} (${nextUser.telegram_id}) about available slot`);
-    }
-    
-    return nextUser;
-  } catch (error) {
-    logger.error('Error notifying next user in queue:', error);
-    throw error;
-  }
+async function handleAdminHelp(bot, chatId) {
+  const message = `
+Comandi Amministratore:
+
+/admin_status - Mostra lo stato dettagliato del sistema
+/admin_stats - Mostra le statistiche del sistema
+/admin_reset_slot @username - Termina forzatamente la sessione di un utente
+/admin_remove_queue @username - Rimuove un utente dalla coda
+/admin_set_max_slots [numero] - Imposta il numero massimo di slot
+/admin_notify_all [messaggio] - Invia un messaggio a tutti gli utenti
+/admin_reset_system - Resetta completamente il sistema (richiede conferma)
+/admin_help - Mostra questo messaggio
+`;
+  
+  bot.sendMessage(chatId, message);
 }
 
 /**
- * Ottiene lo stato attuale del sistema
- * @returns {Promise<Object>} - Oggetto con lo stato del sistema
+ * Formatta un timestamp in formato HH:MM
+ * @param {Date|String} timestamp - Timestamp da formattare
+ * @returns {String} - Timestamp formattato
  */
-async function getSystemStatus() {
-  try {
-    // Ottieni lo stato del sistema
-    const system = await System.findOne({ name: 'system' });
-    
-    if (!system) {
-      throw new Error('Errore di sistema. Configurazione non trovata.');
-    }
-    
-    // Ottieni le sessioni attive
-    const activeSessions = await Session.find({ status: 'active' })
-      .sort({ end_time: 1 });
-    
-    // Aggiungi informazioni sul tempo rimanente
-    const now = new Date();
-    const sessionsWithTime = activeSessions.map(session => {
-      const remainingTime = Math.max(0, Math.round((new Date(session.end_time) - now) / 60000));
-      return {
-        telegram_id: session.telegram_id,
-        username: session.username,
-        slot_number: session.slot_number,
-        start_time: session.start_time,
-        end_time: session.end_time,
-        remaining_minutes: remainingTime
-      };
-    });
-    
-    // Ottieni gli utenti in coda
-    const queuedUsers = await Queue.find().sort({ position: 1 });
-    
-    return {
-      total_slots: system.total_slots,
-      slots_available: system.slots_available,
-      slots_occupied: system.total_slots - system.slots_available,
-      active_sessions: sessionsWithTime,
-      queue: queuedUsers,
-      queue_length: queuedUsers.length
-    };
-  } catch (error) {
-    logger.error('Error getting system status:', error);
-    throw error;
-  }
+function formatTime(timestamp) {
+  const date = new Date(timestamp);
+  return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
 }
 
 /**
- * Aggiorna il numero massimo di slot del sistema
- * @param {Number} newMaxSlots - Nuovo numero massimo di slot
- * @returns {Promise<Object>} - Oggetto sistema aggiornato
+ * Calcola e formatta la differenza di tempo tra un timestamp e adesso
+ * @param {Date|String} timestamp - Timestamp di riferimento
+ * @returns {String} - Differenza di tempo formattata
  */
-async function updateMaxSlots(newMaxSlots) {
-  try {
-    if (newMaxSlots < 1) {
-      throw new Error('Il numero di slot deve essere almeno 1.');
-    }
-    
-    let system = await System.findOne({ name: 'system' });
-    
-    if (!system) {
-      system = new System();
-    }
-    
-    const oldMaxSlots = system.total_slots;
-    system.total_slots = newMaxSlots;
-    
-    // Se il nuovo massimo è maggiore, aumenta gli slot disponibili
-    if (newMaxSlots > oldMaxSlots) {
-      system.slots_available += (newMaxSlots - oldMaxSlots);
-    } else if (newMaxSlots < oldMaxSlots) {
-      // Se il nuovo massimo è minore, diminuisci gli slot disponibili (ma non sotto zero)
-      system.slots_available = Math.max(0, system.slots_available - (oldMaxSlots - newMaxSlots));
-    }
-    
-    await system.save();
-    logger.info(`Updated max slots from ${oldMaxSlots} to ${newMaxSlots}`);
-    
-    return system;
-  } catch (error) {
-    logger.error(`Error updating max slots to ${newMaxSlots}:`, error);
-    throw error;
-  }
-}
-
-/**
- * Rimuove un utente dalla coda (comando admin)
- * @param {String} username - Username Telegram dell'utente
- * @returns {Promise<Object|null>} - Oggetto utente rimosso o null se non trovato
- */
-async function adminRemoveFromQueue(username) {
-  try {
-    // Trova l'utente tramite username
-    const queuedUser = await Queue.findOne({ username: username.replace('@', '') });
-    
-    if (!queuedUser) {
-      throw new Error(`Utente @${username} non trovato in coda.`);
-    }
-    
-    return await removeFromQueue(queuedUser.telegram_id);
-  } catch (error) {
-    logger.error(`Error admin removing ${username} from queue:`, error);
-    throw error;
-  }
-}
-
-/**
- * Ottiene statistiche complete del sistema
- * @returns {Promise<Object>} - Oggetto con le statistiche
- */
-async function getSystemStats() {
-  try {
-    const system = await System.findOne({ name: 'system' });
-    
-    if (!system) {
-      throw new Error('Errore di sistema. Configurazione non trovata.');
-    }
-    
-    // Calcola statistiche dalle sessioni
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    
-    const totalSessions = await Session.countDocuments({ status: { $ne: 'active' } });
-    const todaySessions = await Session.countDocuments({
-      status: { $ne: 'active' },
-      end_time: { $gte: today }
-    });
-    
-    // Calcola tempo medio di ricarica
-    const completedSessions = await Session.find({ status: { $ne: 'active' } });
-    let totalTime = 0;
-    
-    completedSessions.forEach(session => {
-      const startTime = new Date(session.start_time);
-      const endTime = new Date(session.end_time);
-      const duration = (endTime - startTime) / 60000; // in minuti
-      totalTime += duration;
-    });
-    
-    const avgTime = totalSessions > 0 ? Math.round(totalTime / totalSessions) : 0;
-    
-    // Statistiche utenti
-    const totalUsers = await User.countDocuments();
-    const activeUsers = await User.countDocuments({
-      last_charge: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } // ultimi 30 giorni
-    });
-    
-    return {
-      total_slots: system.total_slots,
-      total_charges_completed: system.total_charges_completed,
-      charges_today: todaySessions,
-      avg_charge_time: avgTime,
-      total_users: totalUsers,
-      active_users: activeUsers,
-      current_status: {
-        slots_available: system.slots_available,
-        slots_occupied: system.total_slots - system.slots_available,
-        queue_length: system.queue_length
-      }
-    };
-  } catch (error) {
-    logger.error('Error getting system stats:', error);
-    throw error;
+function formatTimeDiff(timestamp) {
+  const now = new Date();
+  const then = new Date(timestamp);
+  const diffMinutes = Math.floor((now - then) / 60000);
+  
+  if (diffMinutes < 60) {
+    return `${diffMinutes} min`;
+  } else {
+    const hours = Math.floor(diffMinutes / 60);
+    const minutes = diffMinutes % 60;
+    return `${hours}h ${minutes}m`;
   }
 }
 
 module.exports = {
-  requestCharge,
-  getQueuedUsers,
-  getUserByPosition,
-  getNextInQueue,
-  removeFromQueue,
-  notifyNextInQueue,
-  getSystemStatus,
-  updateMaxSlots,
-  adminRemoveFromQueue,
-  getSystemStats
+  handleAdminCommand,
+  handleConfirmReset // Esposto per gestire la conferma del reset
 };
