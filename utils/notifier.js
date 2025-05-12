@@ -1,3 +1,4 @@
+const Session = require('../models/session'); // Aggiunto l'import mancante
 const sessionHandler = require('../handlers/sessionHandler');
 const queueHandler = require('../handlers/queueHandler');
 const config = require('../config');
