@@ -1,8 +1,9 @@
-const Session = require('../models/session'); // Aggiunto l'import mancante
+const Session = require('../models/session');
 const sessionHandler = require('../handlers/sessionHandler');
-const queueHandler = require('../handlers/queueHandler');
+const queueHandler = require('./queueHandler');
 const config = require('../config');
 const logger = require('./logger');
+const formatters = require('./formatters');
 
 /**
  * Avvia il sistema di notifiche periodiche
@@ -67,11 +68,18 @@ async function checkExpiringSessions(bot) {
         Math.round((new Date(session.end_time) - new Date()) / 60000)
       );
       
+      // Invia la notifica con il formato migliorato
+      const reminderMessage = formatters.formatReminderMessage(
+        session.username, 
+        remainingMinutes, 
+        session.end_time
+      );
+      
       // Invia la notifica
       bot.sendMessage(
         session.telegram_id,
-        `@${session.username}, promemoria: ti restano ${remainingMinutes} minuti del tuo tempo di ricarica.\n` +
-        `Per favore, preparati a liberare lo slot entro ${formatTime(session.end_time)}.`
+        reminderMessage,
+        { parse_mode: 'Markdown' }
       );
       
       // Marca la sessione come notificata
@@ -95,12 +103,17 @@ async function checkExpiredSessions(bot) {
     const expiredSessions = await sessionHandler.getExpiredSessions();
     
     for (const session of expiredSessions) {
+      // Invia la notifica con il formato migliorato
+      const timeoutMessage = formatters.formatTimeoutMessage(
+        session.username, 
+        config.MAX_CHARGE_TIME
+      );
+      
       // Invia la notifica
       bot.sendMessage(
         session.telegram_id,
-        `@${session.username}, il tuo tempo di ricarica di ${config.MAX_CHARGE_TIME} minuti è terminato.\n` +
-        `Per favore, libera lo slot per permettere agli altri utenti di ricaricare.\n` +
-        `Conferma con /terminato quando hai staccato il veicolo.`
+        timeoutMessage,
+        { parse_mode: 'Markdown' }
       );
       
       // Marca la sessione come notificata
@@ -136,9 +149,12 @@ async function checkOverdueSessions(bot) {
       if (overdueMinutes >= 5) {
         bot.sendMessage(
           session.telegram_id,
-          `@${session.username}, PROMEMORIA: il tuo tempo è scaduto da ${overdueMinutes} minuti.\n` +
-          `Per favore, libera immediatamente lo slot.\n` +
-          `Conferma con /terminato quando hai staccato il veicolo.`
+          `⚠️ *PROMEMORIA IMPORTANTE*\n\n` +
+          `@${session.username}, il tuo tempo è scaduto da *${overdueMinutes} minuti*.\n\n` +
+          `🔸 Per favore, libera immediatamente lo slot.\n` +
+          `🔸 Conferma con /terminato quando hai staccato il veicolo.\n\n` +
+          `Gli altri utenti stanno aspettando di poter utilizzare la colonnina. Grazie per la collaborazione!`,
+          { parse_mode: 'Markdown' }
         );
         
         logger.info(`Sent overdue reminder to user ${session.username} (${session.telegram_id}) - ${overdueMinutes} minutes overdue`);
@@ -148,16 +164,6 @@ async function checkOverdueSessions(bot) {
     logger.error('Error checking overdue sessions:', error);
     throw error;
   }
-}
-
-/**
- * Formatta un timestamp in formato HH:MM
- * @param {Date|String} timestamp - Timestamp da formattare
- * @returns {String} - Timestamp formattato
- */
-function formatTime(timestamp) {
-  const date = new Date(timestamp);
-  return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
 }
 
 module.exports = {
