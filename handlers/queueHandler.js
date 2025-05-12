@@ -5,6 +5,7 @@ const User = require('../models/user');
 const config = require('../config');
 const moment = require('moment');
 const logger = require('../utils/logger');
+const formatters = require('../utils/formatters');
 
 /**
  * Richiede uno slot di ricarica
@@ -211,12 +212,17 @@ async function notifyNextInQueue(bot) {
     // Se il bot è disponibile, invia una notifica
     if (bot) {
       logger.info(`Notifying user ${nextUser.username} (${nextUser.telegram_id}) about available slot`);
+      
+      const notificationMessage = formatters.formatNotificationMessage(
+        nextUser.username, 
+        nextUser.telegram_id, 
+        config.MAX_CHARGE_TIME
+      );
+      
       bot.sendMessage(
         nextUser.telegram_id,
-        `@${nextUser.username} (ID: ${nextUser.telegram_id}), si è liberato uno slot! È il tuo turno.\n` +
-        `Puoi procedere con la ricarica tramite l'app Antonio Green-Charge.\n` +
-        `Ricorda che hai a disposizione massimo ${config.MAX_CHARGE_TIME} minuti.\n` +
-        `Conferma l'inizio della ricarica con /iniziato quando attivi la colonnina.`
+        notificationMessage,
+        { parse_mode: 'Markdown' }
       );
       
       logger.info(`Notified user ${nextUser.username} (${nextUser.telegram_id}) about available slot`);
