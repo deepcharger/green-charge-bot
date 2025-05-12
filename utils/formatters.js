@@ -34,10 +34,10 @@ function formatTimeDiff(timestamp) {
  */
 function formatSessionStatus(status) {
   const statusMap = {
-    'active': 'Attiva',
-    'completed': 'Completata',
-    'timeout': 'Scaduta',
-    'admin_terminated': 'Terminata da admin'
+    'active': '✅ Attiva',
+    'completed': '✓ Completata',
+    'timeout': '⏱️ Scaduta',
+    'admin_terminated': '🛑 Terminata da admin'
   };
   
   return statusMap[status] || status;
@@ -49,32 +49,32 @@ function formatSessionStatus(status) {
  * @returns {String} - Messaggio formattato
  */
 function formatStatusMessage(status) {
-  let message = `Stato attuale del sistema:\n`;
-  message += `- Slot occupati: ${status.slots_occupied}/${status.total_slots}\n`;
+  let message = `📊 *Stato attuale del sistema*\n`;
+  message += `🔌 Slot occupati: *${status.slots_occupied}/${status.total_slots}*\n`;
   
   if (status.active_sessions.length > 0) {
-    message += `\nUtenti attualmente in ricarica:\n`;
+    message += `\n⚡ *Utenti attualmente in ricarica:*\n`;
     status.active_sessions.forEach((session, index) => {
-      message += `${index + 1}. @${session.username} (termina tra ${session.remaining_minutes} min)\n`;
+      message += `${index + 1}. @${session.username} (⏱️ termina tra *${session.remaining_minutes} min*)\n`;
     });
   } else {
-    message += `\nNessun utente attualmente in ricarica.\n`;
+    message += `\n✨ *Nessun utente attualmente in ricarica.*\n`;
   }
   
   message += `\n`;
   
   if (status.queue.length > 0) {
-    message += `Utenti in attesa: ${status.queue.length}\n`;
-    message += `Tempo medio di attesa stimato: ${estimateWaitTime(status)} minuti\n`;
+    message += `👥 Utenti in attesa: *${status.queue.length}*\n`;
+    message += `⏱️ Tempo medio di attesa stimato: *${estimateWaitTime(status)} minuti*\n`;
     
     if (status.queue.length <= 3) {
-      message += `\nProssimi in coda:\n`;
+      message += `\n🔜 *Prossimi in coda:*\n`;
       status.queue.forEach((user, index) => {
         message += `${index + 1}. @${user.username}\n`;
       });
     }
   } else {
-    message += `Nessun utente in coda.`;
+    message += `✅ *Nessun utente in coda.*`;
   }
   
   return message;
@@ -86,16 +86,54 @@ function formatStatusMessage(status) {
  */
 function formatHelpMessage() {
   return `
-🔋 *Comandi disponibili* 🔋
+🔋 *Benvenuto al sistema Green-Charge* 🔋
 
-/prenota - Prenota uno slot o mettiti in coda
-/iniziato - Conferma l'inizio della ricarica
-/terminato - Conferma la fine della ricarica
-/status - Visualizza lo stato attuale del sistema
-/help - Mostra questo messaggio di aiuto
+*Comandi Utente:*
 
-⏱️ Ricorda che ogni utente ha a disposizione massimo 30 minuti di ricarica.
-👥 Per cortesia, libera la colonnina non appena hai terminato per permettere agli altri di utilizzarla.
+📝 */prenota* - Prenota uno slot o mettiti in coda
+▶️ */iniziato* - Conferma l'inizio della ricarica
+⏹️ */terminato* - Conferma la fine della ricarica
+📊 */status* - Visualizza lo stato attuale del sistema
+❓ */help* - Mostra questo messaggio di aiuto
+
+*Come funziona:*
+1. Usa */prenota* per richiedere un posto
+2. Quando è il tuo turno, attiva la colonnina tramite l'app Antonio Green-Charge
+3. Conferma l'inizio con */iniziato*
+4. Al termine, conferma con */terminato*
+
+⏱️ *Ricorda:* Ogni utente ha a disposizione massimo 30 minuti di ricarica.
+👥 *Cortesia:* Libera la colonnina non appena hai terminato per permettere agli altri di utilizzarla.
+`;
+}
+
+/**
+ * Genera un messaggio di aiuto per amministratori
+ * @returns {String} - Messaggio formattato
+ */
+function formatAdminHelpMessage() {
+  return `
+🔧 *Comandi Amministratore* 🔧
+
+*Gestione Sistema:*
+📊 */admin_status* - Stato dettagliato del sistema
+📈 */admin_stats* - Statistiche del sistema
+🔄 */admin_set_max_slots [numero]* - Imposta il numero massimo di slot
+🔄 */admin_set_charge_time [minuti]* - Imposta il tempo massimo di ricarica
+🔄 */admin_set_reminder_time [minuti]* - Imposta il tempo di promemoria
+🗑️ */admin_reset_system* - Resetta completamente il sistema (richiede conferma)
+
+*Gestione Utenti:*
+⏹️ */admin_reset_slot @username* - Termina forzatamente la sessione
+🚫 */admin_remove_queue @username* - Rimuove un utente dalla coda
+📣 */admin_notify_all [messaggio]* - Invia un messaggio a tutti
+
+*Diagnostica:*
+🔍 */admin_dbtest* - Verifica lo stato del database
+🔄 */admin_update_commands* - Aggiorna i comandi del bot
+
+*Guida:*
+❓ */admin_help* - Mostra questo messaggio
 `;
 }
 
@@ -141,11 +179,13 @@ function estimateWaitTime(status) {
  */
 function formatSessionStartMessage(session) {
   return `
-Hai iniziato la ricarica alle ${formatTime(session.start_time)}.
-Il tempo terminerà alle ${formatTime(session.end_time)}.
-Riceverai un promemoria 5 minuti prima della scadenza.
+✅ *Ricarica iniziata con successo!*
 
-Per terminare in anticipo, usa il comando /terminato.
+⏱️ Orario di inizio: *${formatTime(session.start_time)}*
+⌛ Orario di fine previsto: *${formatTime(session.end_time)}*
+🔔 Riceverai un promemoria 5 minuti prima della scadenza.
+
+Per terminare in anticipo, usa il comando */terminato*.
 `;
 }
 
@@ -156,10 +196,117 @@ Per terminare in anticipo, usa il comando /terminato.
  */
 function formatSessionEndMessage(result) {
   return `
-✅ Ricarica terminata con successo!
-Durata: ${result.durationMinutes} minuti.
+✅ *Ricarica terminata con successo!*
 
-Grazie per aver liberato lo slot per gli altri utenti.
+⏱️ Durata: *${result.durationMinutes} minuti*
+🔋 Grazie per aver utilizzato Green-Charge!
+
+👍 Hai liberato lo slot per gli altri utenti.
+`;
+}
+
+/**
+ * Formatta un messaggio di benvenuto
+ * @param {String} username - Username dell'utente
+ * @param {Number} userId - ID dell'utente
+ * @returns {String} - Messaggio formattato
+ */
+function formatWelcomeMessage(username, userId) {
+  return `
+👋 *Benvenuto @${username}* (ID: ${userId})
+
+Questo bot gestisce la coda per le colonnine di ricarica Green-Charge.
+
+🔸 Usa */prenota* per metterti in coda
+🔸 Usa */status* per vedere lo stato attuale
+🔸 Usa */help* per vedere tutti i comandi disponibili
+
+Buona ricarica! ⚡
+`;
+}
+
+/**
+ * Formatta un messaggio per un utente in coda
+ * @param {String} username - Username dell'utente
+ * @param {Number} userId - ID dell'utente
+ * @param {Number} position - Posizione in coda
+ * @returns {String} - Messaggio formattato
+ */
+function formatQueueMessage(username, userId, position) {
+  return `
+⏳ @${username} (ID: ${userId}), al momento tutti gli slot sono occupati.
+
+🔢 Ti ho aggiunto alla coda in posizione *#${position}*.
+🔔 Riceverai una notifica quando sarà il tuo turno.
+
+Puoi controllare lo stato della coda con */status*.
+`;
+}
+
+/**
+ * Formatta un messaggio per un utente con slot disponibile
+ * @param {String} username - Username dell'utente
+ * @param {Number} userId - ID dell'utente
+ * @param {Number} maxChargeTime - Tempo massimo di ricarica
+ * @returns {String} - Messaggio formattato
+ */
+function formatSlotAvailableMessage(username, userId, maxChargeTime) {
+  return `
+✅ @${username} (ID: ${userId}), c'è uno slot libero! Puoi procedere con la ricarica.
+
+1️⃣ Per favore, usa l'app Antonio Green-Charge per attivare la colonnina.
+2️⃣ Ricorda che hai a disposizione massimo *${maxChargeTime} minuti*.
+3️⃣ Conferma l'inizio della ricarica con */iniziato* quando attivi la colonnina.
+`;
+}
+
+/**
+ * Formatta un messaggio di notifica per un utente in coda
+ * @param {String} username - Username dell'utente
+ * @param {Number} userId - ID dell'utente
+ * @param {Number} maxChargeTime - Tempo massimo di ricarica
+ * @returns {String} - Messaggio formattato
+ */
+function formatNotificationMessage(username, userId, maxChargeTime) {
+  return `
+🔔 @${username} (ID: ${userId}), si è liberato uno slot! È il tuo turno.
+
+1️⃣ Puoi procedere con la ricarica tramite l'app Antonio Green-Charge.
+2️⃣ Ricorda che hai a disposizione massimo *${maxChargeTime} minuti*.
+3️⃣ Conferma l'inizio della ricarica con */iniziato* quando attivi la colonnina.
+
+⏱️ Hai 10 minuti per iniziare, dopodichè lo slot potrebbe essere assegnato ad altri.
+`;
+}
+
+/**
+ * Formatta un messaggio di promemoria per la fine della ricarica
+ * @param {String} username - Username dell'utente
+ * @param {Number} remainingMinutes - Minuti rimanenti
+ * @param {Date} endTime - Orario di fine ricarica
+ * @returns {String} - Messaggio formattato
+ */
+function formatReminderMessage(username, remainingMinutes, endTime) {
+  return `
+⏰ @${username}, promemoria: ti restano *${remainingMinutes} minuti* del tuo tempo di ricarica.
+
+🕐 Il tempo terminerà alle *${formatTime(endTime)}*.
+🔸 Per favore, preparati a liberare lo slot entro tale orario.
+`;
+}
+
+/**
+ * Formatta un messaggio di timeout per la fine della ricarica
+ * @param {String} username - Username dell'utente
+ * @param {Number} maxChargeTime - Tempo massimo di ricarica
+ * @returns {String} - Messaggio formattato
+ */
+function formatTimeoutMessage(username, maxChargeTime) {
+  return `
+⚠️ @${username}, il tuo tempo di ricarica di *${maxChargeTime} minuti* è terminato.
+
+🔋 Per favore, libera lo slot per permettere agli altri utenti di ricaricare.
+✅ Conferma con */terminato* quando hai staccato il veicolo.
 `;
 }
 
@@ -169,7 +316,14 @@ module.exports = {
   formatSessionStatus,
   formatStatusMessage,
   formatHelpMessage,
+  formatAdminHelpMessage,
   estimateWaitTime,
   formatSessionStartMessage,
-  formatSessionEndMessage
+  formatSessionEndMessage,
+  formatWelcomeMessage,
+  formatQueueMessage,
+  formatSlotAvailableMessage,
+  formatNotificationMessage,
+  formatReminderMessage,
+  formatTimeoutMessage
 };
