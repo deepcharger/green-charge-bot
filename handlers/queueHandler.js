@@ -206,8 +206,13 @@ async function notifyNextInQueue(bot) {
       return null;
     }
     
-    // Rimuovi l'utente dalla coda
-    await removeFromQueue(nextUser.telegram_id);
+    // Aggiorna lo stato dell'utente in coda (notificato ma non rimosso)
+    nextUser.notified = true;
+    nextUser.notification_time = new Date();
+    nextUser.slot_reserved = true;
+    await nextUser.save();
+    
+    logger.info(`User ${nextUser.username} (${nextUser.telegram_id}) marked as notified and slot reserved`);
     
     // Se il bot è disponibile, invia una notifica
     if (bot) {
@@ -231,6 +236,76 @@ async function notifyNextInQueue(bot) {
     return nextUser;
   } catch (error) {
     logger.error(`Error notifying next user in queue: ${error.message}`);
+    logger.error(error.stack);
+    throw error;
+  }
+}
+
+/**
+ * Controlla e gestisce gli utenti che hanno ricevuto una notifica ma non hanno iniziato la ricarica
+ * @param {Object} bot - Istanza del bot Telegram
+ * @returns {Promise<void>}
+ */
+async function checkQueueTimeouts(bot) {
+  try {
+    const now = new Date();
+    // Tempo limite: 5 minuti fa
+    const timeoutThreshold = new Date(now.getTime() - 5 * 60000);
+    
+    logger.info('Checking for queue timeouts...');
+    
+    // Trova utenti notificati che non hanno iniziato la ricarica entro il tempo limite
+    const timedOutUsers = await Queue.find({
+      notified: true,
+      notification_time: { $lt: timeoutThreshold },
+      slot_reserved: true
+    });
+    
+    logger.info(`Found ${timedOutUsers.length} users with queue timeout`);
+    
+    for (const user of timedOutUsers) {
+      // Notifica l'utente che ha perso il suo turno
+      if (bot) {
+        bot.sendMessage(
+          user.telegram_id,
+          `⏱️ *Tempo scaduto*\n\n` +
+          `@${user.username}, sono passati più di 5 minuti dalla notifica della disponibilità dello slot di ricarica. ` +
+          `Il tuo turno è stato saltato e lo slot sarà assegnato al prossimo utente in coda.\n\n` +
+          `Se desideri ancora ricaricare, utilizza nuovamente il comando /prenota per metterti in coda.`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+      
+      logger.info(`Queue timeout for user ${user.username} (${user.telegram_id}), removing from queue`);
+      
+      // Rimuovi l'utente dalla coda
+      await removeFromQueue(user.telegram_id);
+      
+      // Notifica il prossimo utente in coda
+      await notifyNextInQueue(bot);
+    }
+  } catch (error) {
+    logger.error(`Error checking queue timeouts: ${error.message}`);
+    logger.error(error.stack);
+    throw error;
+  }
+}
+
+/**
+ * Verifica se l'utente ha uno slot riservato
+ * @param {Number} userId - ID Telegram dell'utente
+ * @returns {Promise<Boolean>} - true se l'utente ha uno slot riservato, false altrimenti
+ */
+async function hasReservedSlot(userId) {
+  try {
+    const queueEntry = await Queue.findOne({ 
+      telegram_id: userId,
+      slot_reserved: true
+    });
+    
+    return queueEntry !== null;
+  } catch (error) {
+    logger.error(`Error checking reserved slot for user ${userId}: ${error.message}`);
     logger.error(error.stack);
     throw error;
   }
@@ -472,6 +547,8 @@ module.exports = {
   getNextInQueue,
   removeFromQueue,
   notifyNextInQueue,
+  checkQueueTimeouts,
+  hasReservedSlot,
   getSystemStatus,
   updateMaxSlots,
   adminRemoveFromQueue,
