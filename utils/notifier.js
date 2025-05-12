@@ -43,12 +43,22 @@ function startNotificationSystem(bot) {
     }
   }, 300000); // Controlla ogni 5 minuti
   
+  // Timer per verificare gli utenti in coda che non hanno iniziato la ricarica
+  const queueTimeoutTimer = setInterval(async () => {
+    try {
+      await queueHandler.checkQueueTimeouts(bot);
+    } catch (error) {
+      logger.error('Errore durante il controllo dei timeout della coda:', error);
+    }
+  }, 60000); // Controlla ogni minuto
+  
   logger.info('Sistema di notifiche avviato');
   
   return {
     reminderTimer,
     timeoutTimer,
-    overdueTimer
+    overdueTimer,
+    queueTimeoutTimer
   };
 }
 
