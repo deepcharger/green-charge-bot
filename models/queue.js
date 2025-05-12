@@ -17,6 +17,18 @@ const queueSchema = new mongoose.Schema({
   request_time: {
     type: Date,
     default: Date.now
+  },
+  notified: {
+    type: Boolean,
+    default: false
+  },
+  notification_time: {
+    type: Date,
+    default: null
+  },
+  slot_reserved: {
+    type: Boolean,
+    default: false
   }
 }, { timestamps: true });
 
