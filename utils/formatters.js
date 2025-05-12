@@ -275,7 +275,7 @@ function formatNotificationMessage(username, userId, maxChargeTime) {
 2️⃣ Ricorda che hai a disposizione massimo *${maxChargeTime} minuti*.
 3️⃣ Conferma l'inizio della ricarica con */iniziato* quando attivi la colonnina.
 
-⏱️ Hai 10 minuti per iniziare, dopodichè lo slot potrebbe essere assegnato ad altri.
+⏱️ *IMPORTANTE*: Hai 5 minuti per confermare l'inizio della ricarica con */iniziato*, dopodichè lo slot sarà assegnato al prossimo utente in coda.
 `;
 }
 
