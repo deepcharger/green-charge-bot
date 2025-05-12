@@ -1,5 +1,7 @@
 const Session = require('../models/session');
 const System = require('../models/system');
+const Queue = require('../models/queue');
+const User = require('../models/user');
 const userHandler = require('./userHandler');
 const queueHandler = require('./queueHandler');
 const config = require('../config');
@@ -31,8 +33,18 @@ async function startSession(userId, username) {
       throw new Error('Errore di sistema. Configurazione non trovata.');
     }
     
-    if (system.slots_available <= 0) {
-      throw new Error('Non ci sono slot disponibili al momento.');
+    // Verifica se l'utente ha uno slot riservato in coda
+    const hasReserved = await queueHandler.hasReservedSlot(userId);
+    
+    if (hasReserved) {
+      // Se l'utente ha uno slot riservato, rimuovilo dalla coda
+      await queueHandler.removeFromQueue(userId);
+      logger.info(`User ${userId} had reserved slot, removed from queue`);
+    } else {
+      // Se non ha slot riservato, verifica che ci siano slot disponibili
+      if (system.slots_available <= 0) {
+        throw new Error('Non ci sono slot disponibili al momento. Usa /prenota per metterti in coda.');
+      }
     }
     
     // Trova il prossimo slot disponibile
