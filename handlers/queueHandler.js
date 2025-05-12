@@ -14,6 +14,8 @@ const logger = require('../utils/logger');
  */
 async function requestCharge(userId, username) {
   try {
+    logger.info(`User ${userId} (${username}) requesting a charging slot`);
+    
     // Controlla se l'utente è già in una sessione attiva
     const activeSession = await Session.findOne({ 
       telegram_id: userId, 
@@ -21,12 +23,14 @@ async function requestCharge(userId, username) {
     });
     
     if (activeSession) {
+      logger.info(`User ${userId} already has an active session`);
       throw new Error('Hai già una sessione di ricarica attiva.');
     }
     
     // Controlla se l'utente è già in coda
     const inQueue = await Queue.findOne({ telegram_id: userId });
     if (inQueue) {
+      logger.info(`User ${userId} is already in queue at position ${inQueue.position}`);
       return {
         slotAvailable: false,
         position: inQueue.position,
@@ -35,21 +39,25 @@ async function requestCharge(userId, username) {
     }
     
     // Ottieni lo stato del sistema
+    logger.info('Getting system status');
     let system = await System.findOne({ name: 'system' });
     if (!system) {
       // Inizializza il sistema se non esiste
+      logger.info('System not found, creating a new one');
       system = new System();
       await system.save();
     }
     
     // Controlla se ci sono slot disponibili
     if (system.slots_available > 0) {
+      logger.info(`Slot available (${system.slots_available}/${system.total_slots})`);
       return {
         slotAvailable: true,
         message: 'Slot disponibile. Puoi procedere con la ricarica.'
       };
     } else {
       // Aggiungi l'utente alla coda
+      logger.info(`No slots available. Adding user ${userId} to queue`);
       const position = system.queue_length + 1;
       
       const queueEntry = new Queue({
@@ -64,6 +72,8 @@ async function requestCharge(userId, username) {
       system.queue_length = position;
       await system.save();
       
+      logger.info(`User ${userId} added to queue at position ${position}`);
+      
       return {
         slotAvailable: false,
         position,
@@ -71,7 +81,8 @@ async function requestCharge(userId, username) {
       };
     }
   } catch (error) {
-    logger.error('Error in requestCharge:', error);
+    logger.error(`Error in requestCharge for user ${userId}: ${error.message}`);
+    logger.error(error.stack);
     throw error;
   }
 }
@@ -82,9 +93,11 @@ async function requestCharge(userId, username) {
  */
 async function getQueuedUsers() {
   try {
+    logger.info('Getting queued users');
     return await Queue.find().sort({ position: 1 });
   } catch (error) {
-    logger.error('Error getting queued users:', error);
+    logger.error(`Error getting queued users: ${error.message}`);
+    logger.error(error.stack);
     throw error;
   }
 }
@@ -96,9 +109,11 @@ async function getQueuedUsers() {
  */
 async function getUserByPosition(position) {
   try {
+    logger.info(`Getting user at queue position ${position}`);
     return await Queue.findOne({ position });
   } catch (error) {
-    logger.error(`Error getting user at position ${position}:`, error);
+    logger.error(`Error getting user at position ${position}: ${error.message}`);
+    logger.error(error.stack);
     throw error;
   }
 }
@@ -109,9 +124,11 @@ async function getUserByPosition(position) {
  */
 async function getNextInQueue() {
   try {
+    logger.info('Getting next user in queue');
     return await Queue.findOne().sort({ position: 1 });
   } catch (error) {
-    logger.error('Error getting next user in queue:', error);
+    logger.error(`Error getting next user in queue: ${error.message}`);
+    logger.error(error.stack);
     throw error;
   }
 }
@@ -123,10 +140,13 @@ async function getNextInQueue() {
  */
 async function removeFromQueue(userId) {
   try {
+    logger.info(`Removing user ${userId} from queue`);
+    
     // Trova l'utente in coda
     const queuedUser = await Queue.findOne({ telegram_id: userId });
     
     if (!queuedUser) {
+      logger.info(`User ${userId} not found in queue`);
       return null;
     }
     
@@ -136,12 +156,14 @@ async function removeFromQueue(userId) {
     await Queue.deleteOne({ telegram_id: userId });
     
     // Aggiorna le posizioni degli altri utenti in coda
+    logger.info(`Updating positions for users after position ${position}`);
     await Queue.updateMany(
       { position: { $gt: position } },
       { $inc: { position: -1 } }
     );
     
     // Aggiorna la lunghezza della coda nel sistema
+    logger.info('Updating system queue length');
     const system = await System.findOne({ name: 'system' });
     if (system) {
       system.queue_length = Math.max(0, system.queue_length - 1);
@@ -152,7 +174,8 @@ async function removeFromQueue(userId) {
     
     return queuedUser;
   } catch (error) {
-    logger.error(`Error removing user ${userId} from queue:`, error);
+    logger.error(`Error removing user ${userId} from queue: ${error.message}`);
+    logger.error(error.stack);
     throw error;
   }
 }
@@ -164,10 +187,13 @@ async function removeFromQueue(userId) {
  */
 async function notifyNextInQueue(bot) {
   try {
+    logger.info('Checking for next user in queue to notify');
+    
     // Verifica se ci sono slot disponibili
     const system = await System.findOne({ name: 'system' });
     
     if (!system || system.slots_available <= 0) {
+      logger.info('No slots available, skipping notification');
       return null;
     }
     
@@ -175,6 +201,7 @@ async function notifyNextInQueue(bot) {
     const nextUser = await getNextInQueue();
     
     if (!nextUser) {
+      logger.info('No users in queue');
       return null;
     }
     
@@ -183,6 +210,7 @@ async function notifyNextInQueue(bot) {
     
     // Se il bot è disponibile, invia una notifica
     if (bot) {
+      logger.info(`Notifying user ${nextUser.username} (${nextUser.telegram_id}) about available slot`);
       bot.sendMessage(
         nextUser.telegram_id,
         `@${nextUser.username} (ID: ${nextUser.telegram_id}), si è liberato uno slot! È il tuo turno.\n` +
@@ -196,7 +224,8 @@ async function notifyNextInQueue(bot) {
     
     return nextUser;
   } catch (error) {
-    logger.error('Error notifying next user in queue:', error);
+    logger.error(`Error notifying next user in queue: ${error.message}`);
+    logger.error(error.stack);
     throw error;
   }
 }
@@ -207,16 +236,36 @@ async function notifyNextInQueue(bot) {
  */
 async function getSystemStatus() {
   try {
+    logger.info('getSystemStatus: Starting to get system status');
+    
     // Ottieni lo stato del sistema
+    logger.info('getSystemStatus: Querying system document');
     const system = await System.findOne({ name: 'system' });
     
     if (!system) {
-      throw new Error('Errore di sistema. Configurazione non trovata.');
+      logger.info('getSystemStatus: System not found, creating new one');
+      // Inizializza un nuovo sistema invece di lanciare un errore
+      const newSystem = new System();
+      await newSystem.save();
+      
+      logger.info('getSystemStatus: Returning empty status for new system');
+      // Restituisci una struttura semplice senza sessioni o code
+      return {
+        total_slots: newSystem.total_slots,
+        slots_available: newSystem.slots_available,
+        slots_occupied: 0,
+        active_sessions: [],
+        queue: [],
+        queue_length: 0
+      };
     }
     
+    logger.info('getSystemStatus: System found, getting active sessions');
     // Ottieni le sessioni attive
     const activeSessions = await Session.find({ status: 'active' })
       .sort({ end_time: 1 });
+    
+    logger.info(`getSystemStatus: Found ${activeSessions.length} active sessions`);
     
     // Aggiungi informazioni sul tempo rimanente
     const now = new Date();
@@ -232,8 +281,12 @@ async function getSystemStatus() {
       };
     });
     
+    logger.info('getSystemStatus: Getting users in queue');
     // Ottieni gli utenti in coda
     const queuedUsers = await Queue.find().sort({ position: 1 });
+    
+    logger.info(`getSystemStatus: Found ${queuedUsers.length} users in queue`);
+    logger.info('getSystemStatus: Returning complete status');
     
     return {
       total_slots: system.total_slots,
@@ -244,7 +297,8 @@ async function getSystemStatus() {
       queue_length: queuedUsers.length
     };
   } catch (error) {
-    logger.error('Error getting system status:', error);
+    logger.error(`Error in getSystemStatus: ${error.message}`);
+    logger.error(error.stack);
     throw error;
   }
 }
@@ -256,13 +310,17 @@ async function getSystemStatus() {
  */
 async function updateMaxSlots(newMaxSlots) {
   try {
+    logger.info(`Updating max slots to ${newMaxSlots}`);
+    
     if (newMaxSlots < 1) {
+      logger.warn(`Invalid max slots value: ${newMaxSlots}`);
       throw new Error('Il numero di slot deve essere almeno 1.');
     }
     
     let system = await System.findOne({ name: 'system' });
     
     if (!system) {
+      logger.info('System not found, creating a new one');
       system = new System();
     }
     
@@ -271,9 +329,11 @@ async function updateMaxSlots(newMaxSlots) {
     
     // Se il nuovo massimo è maggiore, aumenta gli slot disponibili
     if (newMaxSlots > oldMaxSlots) {
+      logger.info(`Increasing available slots by ${newMaxSlots - oldMaxSlots}`);
       system.slots_available += (newMaxSlots - oldMaxSlots);
     } else if (newMaxSlots < oldMaxSlots) {
       // Se il nuovo massimo è minore, diminuisci gli slot disponibili (ma non sotto zero)
+      logger.info(`Decreasing available slots by ${oldMaxSlots - newMaxSlots}`);
       system.slots_available = Math.max(0, system.slots_available - (oldMaxSlots - newMaxSlots));
     }
     
@@ -282,7 +342,8 @@ async function updateMaxSlots(newMaxSlots) {
     
     return system;
   } catch (error) {
-    logger.error(`Error updating max slots to ${newMaxSlots}:`, error);
+    logger.error(`Error updating max slots to ${newMaxSlots}: ${error.message}`);
+    logger.error(error.stack);
     throw error;
   }
 }
@@ -294,16 +355,21 @@ async function updateMaxSlots(newMaxSlots) {
  */
 async function adminRemoveFromQueue(username) {
   try {
+    logger.info(`Admin removing user ${username} from queue`);
+    
     // Trova l'utente tramite username
     const queuedUser = await Queue.findOne({ username: username.replace('@', '') });
     
     if (!queuedUser) {
+      logger.info(`User ${username} not found in queue`);
       throw new Error(`Utente @${username} non trovato in coda.`);
     }
     
+    logger.info(`Found user ${username} in queue, removing`);
     return await removeFromQueue(queuedUser.telegram_id);
   } catch (error) {
-    logger.error(`Error admin removing ${username} from queue:`, error);
+    logger.error(`Error admin removing ${username} from queue: ${error.message}`);
+    logger.error(error.stack);
     throw error;
   }
 }
@@ -314,16 +380,37 @@ async function adminRemoveFromQueue(username) {
  */
 async function getSystemStats() {
   try {
+    logger.info('Getting system statistics');
+    
     const system = await System.findOne({ name: 'system' });
     
     if (!system) {
-      throw new Error('Errore di sistema. Configurazione non trovata.');
+      logger.info('System not found, creating a new one');
+      // Crea un nuovo sistema con statistiche di default
+      const newSystem = new System();
+      await newSystem.save();
+      
+      logger.info('Returning default statistics for new system');
+      return {
+        total_slots: newSystem.total_slots,
+        total_charges_completed: 0,
+        charges_today: 0,
+        avg_charge_time: 0,
+        total_users: 0,
+        active_users: 0,
+        current_status: {
+          slots_available: newSystem.total_slots,
+          slots_occupied: 0,
+          queue_length: 0
+        }
+      };
     }
     
     // Calcola statistiche dalle sessioni
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     
+    logger.info('Counting completed sessions');
     const totalSessions = await Session.countDocuments({ status: { $ne: 'active' } });
     const todaySessions = await Session.countDocuments({
       status: { $ne: 'active' },
@@ -331,6 +418,7 @@ async function getSystemStats() {
     });
     
     // Calcola tempo medio di ricarica
+    logger.info('Calculating average charging time');
     const completedSessions = await Session.find({ status: { $ne: 'active' } });
     let totalTime = 0;
     
@@ -344,11 +432,13 @@ async function getSystemStats() {
     const avgTime = totalSessions > 0 ? Math.round(totalTime / totalSessions) : 0;
     
     // Statistiche utenti
+    logger.info('Getting user statistics');
     const totalUsers = await User.countDocuments();
     const activeUsers = await User.countDocuments({
       last_charge: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } // ultimi 30 giorni
     });
     
+    logger.info('Returning complete statistics');
     return {
       total_slots: system.total_slots,
       total_charges_completed: system.total_charges_completed,
@@ -363,7 +453,8 @@ async function getSystemStats() {
       }
     };
   } catch (error) {
-    logger.error('Error getting system stats:', error);
+    logger.error(`Error getting system stats: ${error.message}`);
+    logger.error(error.stack);
     throw error;
   }
 }
