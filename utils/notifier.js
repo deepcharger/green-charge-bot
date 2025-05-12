@@ -1,6 +1,6 @@
 const Session = require('../models/session');
 const sessionHandler = require('../handlers/sessionHandler');
-const queueHandler = require('./queueHandler');
+const queueHandler = require('../handlers/queueHandler');
 const config = require('../config');
 const logger = require('./logger');
 const formatters = require('./formatters');
