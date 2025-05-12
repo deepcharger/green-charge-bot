@@ -73,8 +73,11 @@ function formatStatusMessage(status) {
         message += `${index + 1}. @${user.username}\n`;
       });
     }
+    
+    message += `\nSei in coda? Per rinunciare al tuo turno, usa */cancella*.`;
   } else {
-    message += `✅ *Nessun utente in coda.*`;
+    message += `✅ *Nessun utente in coda.*\n`;
+    message += `\nVuoi ricaricare? Usa */prenota* per iniziare.`;
   }
   
   return message;
@@ -86,24 +89,38 @@ function formatStatusMessage(status) {
  */
 function formatHelpMessage() {
   return `
-🔋 *Benvenuto al sistema Green-Charge* 🔋
+🔋 *Guida a Green-Charge* 🔋
 
-*Comandi Utente:*
+*Come ricaricare il tuo veicolo:*
 
-📝 */prenota* - Prenota uno slot o mettiti in coda
-▶️ */iniziato* - Conferma l'inizio della ricarica
-⏹️ */terminato* - Conferma la fine della ricarica
-📊 */status* - Visualizza lo stato attuale del sistema
-❓ */help* - Mostra questo messaggio di aiuto
+1️⃣ Usa */prenota* per richiedere una colonnina
+   • Se c'è uno slot libero, riceverai l'OK per procedere
+   • Se tutte le colonnine sono occupate, verrai messo in coda
 
-*Come funziona:*
-1. Usa */prenota* per richiedere un posto
-2. Quando è il tuo turno, attiva la colonnina tramite l'app Antonio Green-Charge
-3. Conferma l'inizio con */iniziato*
-4. Al termine, conferma con */terminato*
+2️⃣ Quando arriva il tuo turno:
+   • Vai alla colonnina e attivala tramite l'app
+   • Conferma l'inizio con */iniziato*
+   • *Hai 5 minuti* per iniziare, altrimenti perderai il turno
 
-⏱️ *Ricorda:* Ogni utente ha a disposizione massimo 30 minuti di ricarica.
-👥 *Cortesia:* Libera la colonnina non appena hai terminato per permettere agli altri di utilizzarla.
+3️⃣ Durante la ricarica:
+   • Hai *30 minuti* massimo a disposizione
+   • Riceverai un promemoria 5 minuti prima della scadenza
+
+4️⃣ Al termine:
+   • Completa la ricarica e scollega il veicolo
+   • Conferma con */terminato* per liberare lo slot
+
+*Altri comandi utili:*
+
+📝 */prenota* - Richiedi una colonnina o mettiti in coda
+❌ */cancella* - Rinuncia al tuo posto in coda
+📊 */status* - Verifica quali colonnine sono libere/occupate 
+❓ */help* - Visualizza questa guida
+
+*Consigli:*
+• Ricevuta la notifica, hai 5 minuti per iniziare
+• Se cambi idea o hai un imprevisto, usa */cancella* per liberare il posto
+• Rispetta il tempo massimo di 30 minuti per la cortesia di tutti
 `;
 }
 
@@ -181,11 +198,16 @@ function formatSessionStartMessage(session) {
   return `
 ✅ *Ricarica iniziata con successo!*
 
-⏱️ Orario di inizio: *${formatTime(session.start_time)}*
-⌛ Orario di fine previsto: *${formatTime(session.end_time)}*
-🔔 Riceverai un promemoria 5 minuti prima della scadenza.
+⏱️ Hai iniziato alle: *${formatTime(session.start_time)}*
+⌛ Termine previsto: *${formatTime(session.end_time)}*
+⏳ Tempo massimo: *30 minuti*
 
-Per terminare in anticipo, usa il comando */terminato*.
+📱 *Cosa fare ora:*
+• Riceverai un promemoria 5 minuti prima della scadenza
+• Quando termini la ricarica, scollega il veicolo
+• Conferma con */terminato* per liberare lo slot
+
+⚠️ *Importante:* Se non confermi entro il tempo massimo, potresti ricevere notifiche di promemoria.
 `;
 }
 
@@ -198,10 +220,11 @@ function formatSessionEndMessage(result) {
   return `
 ✅ *Ricarica terminata con successo!*
 
-⏱️ Durata: *${result.durationMinutes} minuti*
+⏱️ Durata totale: *${result.durationMinutes} minuti*
 🔋 Grazie per aver utilizzato Green-Charge!
 
 👍 Hai liberato lo slot per gli altri utenti.
+Vuoi prenotare una nuova ricarica? Usa */prenota*
 `;
 }
 
@@ -213,13 +236,18 @@ function formatSessionEndMessage(result) {
  */
 function formatWelcomeMessage(username, userId) {
   return `
-👋 *Benvenuto @${username}* (ID: ${userId})
+👋 *Benvenuto a Green-Charge, @${username}!*
 
-Questo bot gestisce la coda per le colonnine di ricarica Green-Charge.
+Questo bot ti aiuta a gestire le colonnine di ricarica in modo semplice e veloce.
 
-🔸 Usa */prenota* per metterti in coda
-🔸 Usa */status* per vedere lo stato attuale
-🔸 Usa */help* per vedere tutti i comandi disponibili
+📱 *Per iniziare subito:*
+
+• Usa */prenota* per richiedere una colonnina
+• Se tutte sono occupate, verrai messo in coda
+• Riceverai una notifica quando sarà il tuo turno
+
+📊 Per verificare lo stato delle colonnine usa */status*
+❓ Per maggiori informazioni usa */help*
 
 Buona ricarica! ⚡
 `;
@@ -234,12 +262,20 @@ Buona ricarica! ⚡
  */
 function formatQueueMessage(username, userId, position) {
   return `
-⏳ @${username} (ID: ${userId}), al momento tutti gli slot sono occupati.
+⏳ *Tutte le colonnine sono occupate in questo momento*
 
-🔢 Ti ho aggiunto alla coda in posizione *#${position}*.
-🔔 Riceverai una notifica quando sarà il tuo turno.
+✅ @${username}, sei stato aggiunto in coda in posizione *#${position}*.
 
-Puoi controllare lo stato della coda con */status*.
+*Cosa succederà ora:*
+• Quando si libera uno slot, gli utenti vengono avvisati in ordine di coda
+• Riceverai una notifica quando sarà il tuo turno
+• Avrai 5 minuti per iniziare la ricarica, dopo la notifica
+
+*Opzioni disponibili:*
+• Usa */status* per controllare la tua posizione in coda
+• Usa */cancella* se cambi idea e non vuoi più attendere
+
+Ti ringraziamo per la pazienza! 🙏
 `;
 }
 
@@ -252,11 +288,20 @@ Puoi controllare lo stato della coda con */status*.
  */
 function formatSlotAvailableMessage(username, userId, maxChargeTime) {
   return `
-✅ @${username} (ID: ${userId}), c'è uno slot libero! Puoi procedere con la ricarica.
+✅ *Ottima notizia, @${username}!*
 
-1️⃣ Per favore, usa l'app Antonio Green-Charge per attivare la colonnina.
-2️⃣ Ricorda che hai a disposizione massimo *${maxChargeTime} minuti*.
-3️⃣ Conferma l'inizio della ricarica con */iniziato* quando attivi la colonnina.
+🟢 **C'è uno slot libero, puoi procedere subito con la ricarica.**
+
+*Ecco cosa fare:*
+
+1️⃣ Vai alla colonnina di ricarica
+2️⃣ Attivala tramite l'app Antonio Green-Charge
+3️⃣ Collega il tuo veicolo
+4️⃣ Conferma l'inizio con */iniziato*
+
+⏱️ Ricorda: hai a disposizione massimo *${maxChargeTime} minuti*.
+
+⚠️ *Importante:* Se non confermi l'inizio con */iniziato*, lo slot rimarrà riservato per te ma non risulterai in ricarica.
 `;
 }
 
@@ -269,13 +314,22 @@ function formatSlotAvailableMessage(username, userId, maxChargeTime) {
  */
 function formatNotificationMessage(username, userId, maxChargeTime) {
   return `
-🔔 @${username} (ID: ${userId}), si è liberato uno slot! È il tuo turno.
+🔔 *È IL TUO TURNO, @${username}!*
 
-1️⃣ Puoi procedere con la ricarica tramite l'app Antonio Green-Charge.
-2️⃣ Ricorda che hai a disposizione massimo *${maxChargeTime} minuti*.
-3️⃣ Conferma l'inizio della ricarica con */iniziato* quando attivi la colonnina.
+🟢 Si è liberato uno slot di ricarica riservato per te.
 
-⏱️ *IMPORTANTE*: Hai 5 minuti per confermare l'inizio della ricarica con */iniziato*, dopodichè lo slot sarà assegnato al prossimo utente in coda.
+*Cosa fare ora:*
+
+1️⃣ Vai subito alla colonnina di ricarica
+2️⃣ Attivala tramite l'app Antonio Green-Charge
+3️⃣ Collega il tuo veicolo
+4️⃣ IMPORTANTE: Conferma l'inizio con */iniziato*
+
+⏱️ Avrai a disposizione massimo *${maxChargeTime} minuti* per la ricarica.
+
+⚠️ *ATTENZIONE: Hai solo 5 minuti per confermare* l'inizio con */iniziato*, altrimenti perderai il turno e lo slot passerà al prossimo utente in coda.
+
+Se non puoi più ricaricare, usa */cancella* per liberare subito lo slot.
 `;
 }
 
@@ -288,10 +342,16 @@ function formatNotificationMessage(username, userId, maxChargeTime) {
  */
 function formatReminderMessage(username, remainingMinutes, endTime) {
   return `
-⏰ @${username}, promemoria: ti restano *${remainingMinutes} minuti* del tuo tempo di ricarica.
+⏰ *Promemoria ricarica, @${username}*
 
-🕐 Il tempo terminerà alle *${formatTime(endTime)}*.
-🔸 Per favore, preparati a liberare lo slot entro tale orario.
+Ti restano solo *${remainingMinutes} minuti* prima del termine.
+
+*Informazioni:*
+• La ricarica terminerà alle *${formatTime(endTime)}*
+• Prepara il veicolo per essere scollegato
+• Al termine, conferma con */terminato*
+
+Grazie per la collaborazione! Altri utenti potrebbero essere in attesa. 👍
 `;
 }
 
@@ -303,10 +363,17 @@ function formatReminderMessage(username, remainingMinutes, endTime) {
  */
 function formatTimeoutMessage(username, maxChargeTime) {
   return `
-⚠️ @${username}, il tuo tempo di ricarica di *${maxChargeTime} minuti* è terminato.
+⚠️ *TEMPO SCADUTO, @${username}*
 
-🔋 Per favore, libera lo slot per permettere agli altri utenti di ricaricare.
-✅ Conferma con */terminato* quando hai staccato il veicolo.
+Il tuo tempo di ricarica di *${maxChargeTime} minuti* è terminato.
+
+*Cosa fare immediatamente:*
+1. Concludi la ricarica sull'app
+2. Scollega il veicolo dalla colonnina
+3. Conferma con */terminato* per liberare lo slot
+
+⚡ Altri utenti sono in attesa per utilizzare la colonnina.
+Grazie per la tua collaborazione!
 `;
 }
 
