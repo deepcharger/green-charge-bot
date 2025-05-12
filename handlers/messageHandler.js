@@ -16,6 +16,9 @@ function init(bot) {
     logger.info('Testing Telegram connection...');
     bot.getMe().then(info => {
       logger.info(`Connected to Telegram as @${info.username}`);
+      
+      // Imposta i comandi del bot
+      setupBotCommands(bot);
     }).catch(err => {
       logger.error('Failed to connect to Telegram:', err);
     });
@@ -34,14 +37,13 @@ function init(bot) {
     try {
       await userHandler.registerUser(userId, username);
       
-      bot.sendMessage(chatId, 
-        `Benvenuto @${username} (ID: ${userId}) al sistema di gestione delle colonnine di ricarica.\n` +
-        `Usa /prenota per metterti in coda, /status per vedere lo stato attuale.`);
+      const welcomeMessage = formatters.formatWelcomeMessage(username, userId);
+      bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
         
       logger.info(`Sent welcome message to user ${userId}`);
     } catch (error) {
       logger.error(`Error in /start command for user ${userId}:`, error);
-      bot.sendMessage(chatId, 'Si è verificato un errore durante l\'avvio. Riprova più tardi.');
+      bot.sendMessage(chatId, '❌ Si è verificato un errore durante l\'avvio. Riprova più tardi.');
     }
   });
 
@@ -58,21 +60,16 @@ function init(bot) {
       
       if (result.slotAvailable) {
         logger.info(`Slot available for user ${userId}, sending instructions`);
-        bot.sendMessage(chatId, 
-          `@${username} (ID: ${userId}), c'è uno slot libero! Puoi procedere con la ricarica.\n` +
-          `Per favore, usa l'app Antonio Green-Charge per attivare la colonnina.\n` +
-          `Ricorda che hai a disposizione massimo ${config.MAX_CHARGE_TIME} minuti.\n` +
-          `Conferma l'inizio della ricarica con /iniziato quando attivi la colonnina.`);
+        const availableMessage = formatters.formatSlotAvailableMessage(username, userId, config.MAX_CHARGE_TIME);
+        bot.sendMessage(chatId, availableMessage, { parse_mode: 'Markdown' });
       } else {
         logger.info(`No slots available, user ${userId} added to queue at position ${result.position}`);
-        bot.sendMessage(chatId, 
-          `@${username} (ID: ${userId}), al momento tutti gli slot sono occupati.\n` +
-          `Ti ho aggiunto alla coda in posizione #${result.position}.\n` +
-          `Riceverai una notifica quando sarà il tuo turno.`);
+        const queueMessage = formatters.formatQueueMessage(username, userId, result.position);
+        bot.sendMessage(chatId, queueMessage, { parse_mode: 'Markdown' });
       }
     } catch (error) {
       logger.error(`Error in /prenota command for user ${userId}:`, error);
-      bot.sendMessage(chatId, `Si è verificato un errore: ${error.message}`);
+      bot.sendMessage(chatId, `❌ Si è verificato un errore: ${error.message}`);
     }
   });
 
@@ -90,15 +87,15 @@ function init(bot) {
       logger.info(`Session started for user ${userId}, slot ${session.slot_number}`);
       
       const message = formatters.formatSessionStartMessage(session);
-      bot.sendMessage(chatId, message);
+      bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
       
       // Aggiorna lo stato del sistema nel messaggio di stato per tutti
       const systemStatus = await queueHandler.getSystemStatus();
       bot.sendMessage(chatId, 
-        `Attualmente occupati ${systemStatus.slots_occupied}/${systemStatus.total_slots} slot.`);
+        `🔌 Attualmente occupati ${systemStatus.slots_occupied}/${systemStatus.total_slots} slot.`);
     } catch (error) {
       logger.error(`Error in /iniziato command for user ${userId}:`, error);
-      bot.sendMessage(chatId, `Si è verificato un errore: ${error.message}`);
+      bot.sendMessage(chatId, `❌ Si è verificato un errore: ${error.message}`);
     }
   });
 
@@ -116,18 +113,18 @@ function init(bot) {
       logger.info(`Session ended for user ${userId}, duration: ${result.durationMinutes} minutes`);
       
       const message = formatters.formatSessionEndMessage(result);
-      bot.sendMessage(chatId, message);
+      bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
       
       // Aggiorna lo stato del sistema nel messaggio di stato per tutti
       const systemStatus = await queueHandler.getSystemStatus();
       bot.sendMessage(chatId, 
-        `Attualmente occupati ${systemStatus.slots_occupied}/${systemStatus.total_slots} slot.`);
+        `🔌 Attualmente occupati ${systemStatus.slots_occupied}/${systemStatus.total_slots} slot.`);
       
       // Notifica il prossimo utente in coda
       await queueHandler.notifyNextInQueue(bot);
     } catch (error) {
       logger.error(`Error in /terminato command for user ${userId}:`, error);
-      bot.sendMessage(chatId, `Si è verificato un errore: ${error.message}`);
+      bot.sendMessage(chatId, `❌ Si è verificato un errore: ${error.message}`);
     }
   });
 
@@ -144,12 +141,12 @@ function init(bot) {
       
       const message = formatters.formatStatusMessage(status);
       
-      bot.sendMessage(chatId, message);
+      bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
       logger.info(`Sent status message to user ${userId}`);
     } catch (error) {
       logger.error(`Error in /status command from user ${userId}:`, error);
       logger.error(error.stack);
-      bot.sendMessage(chatId, `Si è verificato un errore durante il recupero dello stato.`);
+      bot.sendMessage(chatId, `❌ Si è verificato un errore durante il recupero dello stato.`);
     }
   });
 
@@ -176,21 +173,77 @@ function init(bot) {
     // Verifica che l'utente sia admin
     if (userId !== config.ADMIN_USER_ID) {
       logger.warn(`User ${userId} tried to use admin command but is not admin`);
-      bot.sendMessage(chatId, 'Comando riservato agli amministratori.');
+      bot.sendMessage(chatId, '🚫 Comando riservato agli amministratori.');
       return;
     }
     
     const command = match[1];
     
     try {
+      // Gestisci i comandi admin
       if (command === 'confirm_reset') {
         await adminHandler.handleConfirmReset(bot, chatId);
+      } else if (command === 'help') {
+        // Comando help admin
+        const helpMessage = formatters.formatAdminHelpMessage();
+        bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
+      } else if (command === 'update_commands') {
+        // Comando per aggiornare i comandi del bot
+        await setupBotCommands(bot);
+        bot.sendMessage(chatId, '✅ Comandi del bot aggiornati con successo!');
+      } else if (command === 'set_charge_time') {
+        // Comando per impostare il tempo massimo di ricarica
+        const params = msg.text.split(' ').slice(1);
+        if (params.length < 1 || isNaN(parseInt(params[0]))) {
+          bot.sendMessage(chatId, '❌ Uso: /admin_set_charge_time [minuti]');
+          return;
+        }
+        
+        const minutes = parseInt(params[0]);
+        if (minutes < 1 || minutes > 120) {
+          bot.sendMessage(chatId, '❌ Il tempo di ricarica deve essere tra 1 e 120 minuti.');
+          return;
+        }
+        
+        // Aggiorna la configurazione
+        config.MAX_CHARGE_TIME = minutes;
+        
+        // Aggiorna anche l'environment variable se possibile
+        if (process.env.MAX_CHARGE_TIME) {
+          process.env.MAX_CHARGE_TIME = minutes.toString();
+        }
+        
+        bot.sendMessage(chatId, `✅ Tempo massimo di ricarica impostato a ${minutes} minuti.`);
+      } else if (command === 'set_reminder_time') {
+        // Comando per impostare il tempo di promemoria
+        const params = msg.text.split(' ').slice(1);
+        if (params.length < 1 || isNaN(parseInt(params[0]))) {
+          bot.sendMessage(chatId, '❌ Uso: /admin_set_reminder_time [minuti]');
+          return;
+        }
+        
+        const minutes = parseInt(params[0]);
+        if (minutes < 1 || minutes > 30) {
+          bot.sendMessage(chatId, '❌ Il tempo di promemoria deve essere tra 1 e 30 minuti.');
+          return;
+        }
+        
+        // Aggiorna la configurazione
+        config.REMINDER_TIME = minutes;
+        
+        // Aggiorna anche l'environment variable se possibile
+        if (process.env.REMINDER_TIME) {
+          process.env.REMINDER_TIME = minutes.toString();
+        }
+        
+        bot.sendMessage(chatId, `✅ Tempo di promemoria impostato a ${minutes} minuti.`);
       } else {
+        // Altri comandi admin
         await adminHandler.handleAdminCommand(bot, chatId, userId, command, msg.text);
       }
     } catch (error) {
       logger.error(`Error in admin command ${command} from user ${userId}:`, error);
-      bot.sendMessage(chatId, `Si è verificato un errore durante l'esecuzione del comando admin: ${error.message}`);
+      bot.sendMessage(chatId, `❌ Si è verificato un errore durante l'esecuzione del comando admin: ${error.message}`);
     }
   });
 
@@ -202,7 +255,7 @@ function init(bot) {
     // Verifica che l'utente sia admin
     if (userId !== config.ADMIN_USER_ID) {
       logger.warn(`User ${userId} tried to use dbtest command but is not admin`);
-      bot.sendMessage(chatId, 'Comando riservato agli amministratori.');
+      bot.sendMessage(chatId, '🚫 Comando riservato agli amministratori.');
       return;
     }
     
@@ -222,14 +275,15 @@ function init(bot) {
       logger.info(`Database test results: System=${systemCount}, Session=${sessionCount}, Queue=${queueCount}, User=${userCount}`);
       
       bot.sendMessage(chatId, 
-        `Database status:\n` +
-        `- System documents: ${systemCount}\n` +
-        `- Session documents: ${sessionCount}\n` +
-        `- Queue documents: ${queueCount}\n` +
-        `- User documents: ${userCount}`);
+        `📊 *Stato Database:*\n` +
+        `- System documents: *${systemCount}*\n` +
+        `- Session documents: *${sessionCount}*\n` +
+        `- Queue documents: *${queueCount}*\n` +
+        `- User documents: *${userCount}*`, 
+        { parse_mode: 'Markdown' });
     } catch (error) {
       logger.error(`Error in /dbtest command:`, error);
-      bot.sendMessage(chatId, `Errore durante il test del database: ${error.message}`);
+      bot.sendMessage(chatId, `❌ Errore durante il test del database: ${error.message}`);
     }
   });
 
@@ -239,6 +293,52 @@ function init(bot) {
   });
   
   logger.info('Message handlers initialized');
+}
+
+/**
+ * Imposta i comandi del bot su Telegram
+ * @param {Object} bot - Istanza del bot Telegram
+ * @returns {Promise<void>}
+ */
+async function setupBotCommands(bot) {
+  try {
+    await bot.setMyCommands([
+      { command: 'start', description: 'Avvia il bot' },
+      { command: 'prenota', description: 'Prenota uno slot o mettiti in coda' },
+      { command: 'iniziato', description: 'Conferma l\'inizio della ricarica' },
+      { command: 'terminato', description: 'Conferma la fine della ricarica' },
+      { command: 'status', description: 'Visualizza lo stato attuale del sistema' },
+      { command: 'help', description: 'Mostra i comandi disponibili' }
+    ]);
+    
+    logger.info('Bot commands updated successfully');
+    
+    // Imposta anche i comandi admin (visibili solo all'admin)
+    try {
+      if (config.ADMIN_USER_ID) {
+        await bot.setMyCommands([
+          { command: 'admin_status', description: 'Stato dettagliato del sistema' },
+          { command: 'admin_stats', description: 'Statistiche del sistema' },
+          { command: 'admin_set_max_slots', description: 'Imposta il numero massimo di slot' },
+          { command: 'admin_set_charge_time', description: 'Imposta il tempo massimo di ricarica' },
+          { command: 'admin_set_reminder_time', description: 'Imposta il tempo di promemoria' },
+          { command: 'admin_reset_slot', description: 'Termina forzatamente la sessione di un utente' },
+          { command: 'admin_remove_queue', description: 'Rimuove un utente dalla coda' },
+          { command: 'admin_notify_all', description: 'Invia un messaggio a tutti gli utenti' },
+          { command: 'admin_reset_system', description: 'Resetta completamente il sistema' },
+          { command: 'admin_help', description: 'Mostra i comandi admin disponibili' },
+          { command: 'dbtest', description: 'Verifica lo stato del database' },
+          { command: 'admin_update_commands', description: 'Aggiorna i comandi del bot' }
+        ], { scope: { type: 'chat', chat_id: config.ADMIN_USER_ID } });
+        
+        logger.info('Admin commands updated successfully');
+      }
+    } catch (error) {
+      logger.error('Error setting admin commands:', error);
+    }
+  } catch (error) {
+    logger.error('Error setting bot commands:', error);
+  }
 }
 
 module.exports = { init };
