@@ -5,6 +5,8 @@ const adminHandler = require('./adminHandler');
 const config = require('../config');
 const logger = require('../utils/logger');
 const formatters = require('../utils/formatters');
+const Queue = require('../models/queue');
+const Session = require('../models/session');
 
 /**
  * Inizializza la gestione dei messaggi e comandi
@@ -69,6 +71,61 @@ function init(bot) {
       }
     } catch (error) {
       logger.error(`Error in /prenota command for user ${userId}:`, error);
+      bot.sendMessage(chatId, `❌ Si è verificato un errore: ${error.message}`);
+    }
+  });
+
+  // Comando cancella
+  bot.onText(/\/cancella/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const username = msg.from.username || `user${userId}`;
+    
+    logger.info(`Received /cancella command from user ${userId} (${username})`);
+    
+    try {
+      // Verifica se l'utente è in coda
+      const inQueue = await Queue.findOne({ telegram_id: userId });
+      
+      if (inQueue) {
+        // Rimuovilo dalla coda
+        const position = inQueue.position;
+        await queueHandler.removeFromQueue(userId);
+        
+        logger.info(`User ${userId} (${username}) removed from queue at position ${position}`);
+        
+        // Invia conferma all'utente
+        bot.sendMessage(chatId, 
+          `✅ @${username}, sei stato rimosso dalla coda con successo.\n\n` +
+          `Eri in posizione *#${position}*.\n\n` +
+          `Se vorrai ricaricare in futuro, usa nuovamente /prenota.`,
+          { parse_mode: 'Markdown' });
+        
+        return;
+      }
+      
+      // Verifica se l'utente ha una sessione attiva
+      const session = await Session.findOne({ 
+        telegram_id: userId,
+        status: 'active'
+      });
+      
+      if (session) {
+        bot.sendMessage(chatId, 
+          `ℹ️ @${username}, hai una sessione di ricarica attiva.\n\n` +
+          `Se vuoi terminare la ricarica, usa il comando /terminato.`,
+          { parse_mode: 'Markdown' });
+        return;
+      }
+      
+      // Se non è né in coda né in sessione
+      bot.sendMessage(chatId, 
+        `ℹ️ @${username}, non sei attualmente in coda né hai una sessione attiva.\n\n` +
+        `Per prenotare una ricarica, usa il comando /prenota.`,
+        { parse_mode: 'Markdown' });
+      
+    } catch (error) {
+      logger.error(`Error in /cancella command for user ${userId}:`, error);
       bot.sendMessage(chatId, `❌ Si è verificato un errore: ${error.message}`);
     }
   });
@@ -305,6 +362,7 @@ async function setupBotCommands(bot) {
     await bot.setMyCommands([
       { command: 'start', description: 'Avvia il bot' },
       { command: 'prenota', description: 'Prenota uno slot o mettiti in coda' },
+      { command: 'cancella', description: 'Cancella la tua prenotazione in coda' },
       { command: 'iniziato', description: 'Conferma l\'inizio della ricarica' },
       { command: 'terminato', description: 'Conferma la fine della ricarica' },
       { command: 'status', description: 'Visualizza lo stato attuale del sistema' },
