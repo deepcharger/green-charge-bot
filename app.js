@@ -25,6 +25,7 @@ let masterLockHeartbeatInterval = null;
 let executionLockHeartbeatInterval = null;
 let lockCheckInterval = null;
 let isShuttingDown = false; // Flag per indicare che è in corso lo shutdown
+let notificationSystem = null; // Riferimento al sistema di notifiche
 
 // Timeout per la terminazione (ms)
 const SHUTDOWN_TIMEOUT = 5000;
@@ -573,8 +574,13 @@ function startBot() {
     // Avvio sistema di notifiche periodiche
     logger.info('Avvio sistema di notifiche...');
     try {
-      const notifierSystem = notifier.startNotificationSystem(bot);
-      if (notifierSystem) {
+      // Ferma eventuali sistemi di notifiche precedenti
+      if (notificationSystem && notificationSystem.stop) {
+        notificationSystem.stop();
+      }
+      
+      notificationSystem = notifier.startNotificationSystem(bot);
+      if (notificationSystem) {
         logger.info('✅ Sistema di notifiche avviato correttamente');
       } else {
         logger.error('❌ Errore nell\'avvio del sistema di notifiche');
@@ -668,6 +674,12 @@ async function performShutdown(reason = 'NORMAL') {
   logger.info(`Bot in fase di terminazione (${reason})`);
   
   try {
+    // Ferma il sistema di notifiche
+    if (notificationSystem && notificationSystem.stop) {
+      notificationSystem.stop();
+      notificationSystem = null;
+    }
+    
     // Ferma tutti gli intervalli
     if (masterLockHeartbeatInterval) {
       clearInterval(masterLockHeartbeatInterval);
