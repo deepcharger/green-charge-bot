@@ -24,17 +24,22 @@ const instanceTracker = new InstanceTracker(INSTANCE_ID);
 // Variabili per gestire il backoff e i tentativi di connessione
 let pollingRetryCount = 0;
 let networkErrorCount = 0; // Contatore per gli errori di rete
-const MAX_RETRY_COUNT = 10; // Aumentato da 5 a 10
-const MAX_NETWORK_ERROR_COUNT = 10; // Aumentato da 5 a 10
+let connectionFailureCount = 0; // Contatore per tentativi di connessione falliti
+let lastConnectionAttemptTime = 0; // Timestamp dell'ultimo tentativo di connessione
+const MAX_RETRY_COUNT = 10; // Massimo numero di tentativi di riavvio
+const MAX_NETWORK_ERROR_COUNT = 10; // Massimo numero di errori di rete consecutivi
+const MAX_CONNECTION_FAILURES = 6; // Massimo numero di fallimenti di connessione consecutivi
 const MIN_INITIAL_DELAY = 20000; // 20 secondi
 const MAX_INITIAL_DELAY = 40000; // 40 secondi
-const GLOBAL_LOCK_TIMEOUT = 180000; // Aumentato a 180 secondi (3 minuti)
-const TASK_LOCK_TIMEOUT = 180000; // Aumentato a 180 secondi (3 minuti)
+const GLOBAL_LOCK_TIMEOUT = 180000; // 180 secondi (3 minuti)
+const TASK_LOCK_TIMEOUT = 60000; // 60 secondi per i task lock
+const CONNECTION_ATTEMPT_COOLDOWN = 30000; // 30 secondi min tra i tentativi di connessione
 
 let bot = null;
 let masterLockHeartbeatInterval = null;
 let executionLockHeartbeatInterval = null;
 let lockCheckInterval = null;
+let keepAliveInterval = null;
 let isShuttingDown = false; // Flag per indicare che è in corso lo shutdown
 let notificationSystem = null; // Riferimento al sistema di notifiche
 let isBotStarting = false; // Flag per evitare avvii multipli simultanei
@@ -47,7 +52,7 @@ let telegramConflictDetected = false;
 let lastTelegramConflictTime = null;
 
 // Timeout per la terminazione (ms)
-const SHUTDOWN_TIMEOUT = 15000; // Aumentato a 15 secondi per dare più tempo
+const SHUTDOWN_TIMEOUT = 15000; // 15 secondi per dare più tempo
 
 // Logging all'avvio
 logger.info('====== AVVIO BOT GREEN-CHARGE ======');
@@ -66,15 +71,15 @@ logger.info(`REMINDER_TIME: ${config.REMINDER_TIME}`);
 const mongooseOptions = {
   useNewUrlParser: true,
   useUnifiedTopology: true,
-  serverSelectionTimeoutMS: 15000, // Aumentato da 5000 a 15000
-  socketTimeoutMS: 60000, // Aumentato da 45000 a 60000
+  serverSelectionTimeoutMS: 15000, // 15 secondi per timeout di selezione server
+  socketTimeoutMS: 60000, // 60 secondi per timeout socket
   family: 4, // Usa IPv4, evita problemi con IPv6
   // Questi parametri migliorano la stabilità della connessione
-  connectTimeoutMS: 30000, // Aumentato da 10000 a 30000
-  heartbeatFrequencyMS: 10000,
+  connectTimeoutMS: 30000, // 30 secondi per timeout di connessione
+  heartbeatFrequencyMS: 10000, // Heartbeat ogni 10 secondi
   retryWrites: true,
-  maxPoolSize: 20, // Aumentato da 10 a 20
-  minPoolSize: 5,  // Aumentato da 2 a 5
+  maxPoolSize: 20, // 20 connessioni massime nel pool
+  minPoolSize: 5,  // 5 connessioni minime nel pool
   // Imposta la lettura persistente
   keepAlive: true,
   keepAliveInitialDelay: 300000 // 5 minuti
@@ -159,6 +164,16 @@ async function acquireTaskLock(taskName, timeoutMs = TASK_LOCK_TIMEOUT) {
     // Genera un ID univoco per il lock
     const lockId = `${taskName}_${Date.now()}_${uuidv4().split('-')[0]}`;
     
+    // MODIFICATO: Aggiungi un controllo per i lock di test Telegram
+    if (taskName === 'telegram_test') {
+      // Elimina preventivamente lock molto vecchi (creati da più di 1 minuto)
+      const oneMinuteAgo = new Date(Date.now() - 60000);
+      await TaskLock.deleteMany({
+        task_name: 'telegram_test',
+        created_at: { $lt: oneMinuteAgo }
+      });
+    }
+    
     // Verifica che non ci siano già lock attivi per questa operazione
     const existingLock = await TaskLock.findOne({
       task_name: taskName,
@@ -166,6 +181,29 @@ async function acquireTaskLock(taskName, timeoutMs = TASK_LOCK_TIMEOUT) {
     });
     
     if (existingLock) {
+      // MODIFICATO: Se è un lock telegram_test molto vecchio, forzane la rimozione
+      if (taskName === 'telegram_test') {
+        const lockAge = Date.now() - new Date(existingLock.created_at).getTime();
+        if (lockAge > 60000) { // 1 minuto
+          logger.warn(`Rilevato lock telegram_test vecchio (${Math.round(lockAge/1000)}s), forzatura rimozione`);
+          await TaskLock.deleteOne({ _id: existingLock._id });
+          
+          // Crea un nuovo lock
+          const taskLock = new TaskLock({
+            task_name: taskName,
+            lock_id: lockId,
+            instance_id: INSTANCE_ID,
+            created_at: new Date(),
+            expires_at: new Date(Date.now() + timeoutMs)
+          });
+          
+          await taskLock.save();
+          
+          logger.info(`Lock forzato per l'operazione ${taskName} (ID: ${lockId})`);
+          return { success: true, lockId };
+        }
+      }
+      
       // C'è già un lock attivo
       return { success: false, lockId: null };
     }
@@ -250,23 +288,132 @@ async function executeWithLock(taskName, taskFunction, timeoutMs = TASK_LOCK_TIM
 }
 
 /**
+ * Pulisce i lock di test Telegram orfani
+ * @returns {Promise<number>} - Numero di lock rimossi
+ */
+async function cleanupTelegramTestLocks() {
+  try {
+    // Elimina lock scaduti
+    const expiredResult = await TaskLock.deleteMany({
+      task_name: 'telegram_test',
+      expires_at: { $lt: new Date() }
+    });
+    
+    // Elimina anche lock molto vecchi (creati da più di 2 minuti) indipendentemente dalla scadenza
+    // Questo copre i casi in cui il processo è terminato senza rilasciare il lock
+    const twoMinutesAgo = new Date(Date.now() - 120000);
+    const oldResult = await TaskLock.deleteMany({
+      task_name: 'telegram_test',
+      created_at: { $lt: twoMinutesAgo }
+    });
+    
+    const totalRemoved = expiredResult.deletedCount + oldResult.deletedCount;
+    
+    if (totalRemoved > 0) {
+      logger.info(`Rimossi ${totalRemoved} lock di test Telegram obsoleti`);
+    }
+    
+    return totalRemoved;
+  } catch (error) {
+    logger.error('Errore nella pulizia dei lock di test Telegram:', error);
+    return 0;
+  }
+}
+
+/**
  * Pulisce i task lock scaduti
  * @returns {Promise<number>} - Numero di lock scaduti rimossi
  */
 async function cleanupExpiredTaskLocks() {
   try {
+    // Pulisci i task lock scaduti
     const result = await TaskLock.deleteMany({
       expires_at: { $lt: new Date() }
     });
     
-    if (result.deletedCount > 0) {
-      logger.info(`Rimossi ${result.deletedCount} task lock scaduti`);
+    let deletedCount = result.deletedCount;
+    
+    // Aggiungi la pulizia specifica per i lock di test Telegram 
+    deletedCount += await cleanupTelegramTestLocks();
+    
+    if (deletedCount > 0) {
+      logger.info(`Rimossi ${deletedCount} task lock scaduti`);
     }
     
-    return result.deletedCount;
+    return deletedCount;
   } catch (error) {
     logger.error('Errore nella pulizia dei task lock scaduti:', error);
     return 0;
+  }
+}
+
+/**
+ * Funzione per gestire situazioni di stallo dei lock
+ * @returns {Promise<boolean>} - true se la pulizia è stata eseguita con successo
+ */
+async function emergencyCleanupLocks() {
+  logger.warn('Esecuzione pulizia di emergenza dei lock');
+  
+  try {
+    // Rimuovi TUTTI i lock di test Telegram
+    const telegramTestResult = await TaskLock.deleteMany({ task_name: 'telegram_test' });
+    logger.info(`Rimossi ${telegramTestResult.deletedCount} lock di test Telegram in emergenza`);
+    
+    // Controlla se ci sono altri lock che potrebbero bloccarci
+    const activeLocks = await TaskLock.find({ instance_id: { $ne: INSTANCE_ID } });
+    
+    if (activeLocks.length > 0) {
+      logger.warn(`Rilevati ${activeLocks.length} lock attivi di altre istanze`);
+      
+      // Rimuovi lock molto vecchi (oltre 5 minuti)
+      const fiveMinutesAgo = new Date(Date.now() - 300000);
+      const oldLocksResult = await TaskLock.deleteMany({
+        instance_id: { $ne: INSTANCE_ID },
+        created_at: { $lt: fiveMinutesAgo }
+      });
+      
+      logger.info(`Rimossi ${oldLocksResult.deletedCount} lock molto vecchi di altre istanze`);
+    }
+    
+    return true;
+  } catch (error) {
+    logger.error('Errore durante la pulizia di emergenza:', error);
+    return false;
+  }
+}
+
+/**
+ * Rilascia immediatamente le risorse Telegram senza attendere
+ * Usato principalmente durante SIGTERM o errori gravi
+ */
+async function emergencyReleaseTelegram() {
+  try {
+    // Elimina immediatamente il webhook se è impostato
+    if (bot) {
+      try {
+        bot.removeAllListeners();
+        await bot.stopPolling({ cancel: true });
+      } catch (err) {
+        // Ignora errori
+      }
+      bot = null;
+    }
+    
+    // Rilascia il lock Telegram a livello di DB
+    try {
+      await TaskLock.deleteMany({ task_name: 'telegram_test' });
+    } catch (err) {
+      // Ignora errori
+    }
+    
+    // Forzare una piccola attesa per permettere all'API di Telegram di resettare
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    logger.info('Risorse Telegram rilasciate in emergenza');
+    return true;
+  } catch (error) {
+    logger.error('Errore durante il rilascio di emergenza:', error);
+    return false;
   }
 }
 
@@ -313,6 +460,9 @@ async function checkGlobalConnectionState() {
  * @returns {Promise<boolean>} - true se la connessione è riuscita
  */
 async function testTelegramConnection() {
+  // Variabile per tenere traccia dell'ID del lock acquisito
+  let acquiredLockId = null;
+  
   // Se abbiamo rilevato un conflitto negli ultimi 60 secondi, meglio attendere
   if (telegramConflictDetected && lastTelegramConflictTime) {
     const timeSinceLastConflict = Date.now() - lastTelegramConflictTime;
@@ -324,16 +474,49 @@ async function testTelegramConnection() {
 
   try {
     // Usiamo un lock per evitare che più istanze tentino di testare contemporaneamente
-    const { success } = await acquireTaskLock('telegram_test', 10000); // 10 secondi
+    const { success, lockId } = await acquireTaskLock('telegram_test', 20000); // 20 secondi 
+    acquiredLockId = lockId; // Salva l'ID del lock per rilasciarlo alla fine
+    
     if (!success) {
-      logger.warn('Un\'altra istanza sta già testando la connessione Telegram, attendiamo');
+      // Incrementa il contatore di fallimenti
+      connectionFailureCount++;
+      
+      // Se abbiamo troppi fallimenti consecutivi, esegui una pulizia di emergenza
+      if (connectionFailureCount > MAX_CONNECTION_FAILURES) {
+        logger.warn(`Troppi fallimenti consecutivi (${connectionFailureCount}), esecuzione pulizia di emergenza`);
+        await emergencyCleanupLocks();
+        connectionFailureCount = 0; // Reset del contatore
+      }
+      
+      // Controlla quando scade il lock attuale
+      try {
+        const existingLock = await TaskLock.findOne({
+          task_name: 'telegram_test',
+          expires_at: { $gt: new Date() }
+        });
+        
+        if (existingLock) {
+          const timeLeft = Math.round((new Date(existingLock.expires_at) - new Date()) / 1000);
+          logger.warn(`Un'altra istanza sta già testando la connessione Telegram (${existingLock.instance_id}), attendiamo ${timeLeft}s`);
+        } else {
+          logger.warn(`Un'altra istanza sta già testando la connessione Telegram, attendiamo`);
+        }
+      } catch (err) {
+        logger.warn(`Un'altra istanza sta già testando la connessione Telegram, attendiamo`);
+      }
+      
       return false;
     }
     
+    // Esegui il test di connessione
     const testBot = new TelegramBot(config.BOT_TOKEN, { polling: false });
     await testBot.getMe();
+    
     // Reset del flag di conflitto se la connessione ha successo
     telegramConflictDetected = false;
+    // Reset dei contatori di fallimento
+    connectionFailureCount = 0;
+    
     return true;
   } catch (error) {
     if (error.code === 'ETELEGRAM' && error.message && error.message.includes('409 Conflict')) {
@@ -346,6 +529,16 @@ async function testTelegramConnection() {
     logger.error('Errore durante il test di connessione a Telegram:', error);
     // In caso di altri errori, meglio evitare di connettersi
     return false;
+  } finally {
+    // Rilascia SEMPRE il lock se è stato acquisito
+    if (acquiredLockId) {
+      try {
+        await releaseTaskLock('telegram_test', acquiredLockId);
+        logger.debug(`Lock Telegram test rilasciato (ID: ${acquiredLockId})`);
+      } catch (err) {
+        logger.error(`Errore nel rilascio del lock Telegram test (ID: ${acquiredLockId}):`, err);
+      }
+    }
   }
 }
 
@@ -380,6 +573,9 @@ async function initializeBot() {
     // Pulisci eventuali lock orfani appartenenti a questa istanza (improbabile ma per sicurezza)
     await Lock.deleteMany({ instance_id: INSTANCE_ID });
     await TaskLock.deleteMany({ instance_id: INSTANCE_ID });
+    
+    // Esegui una pulizia di emergenza all'avvio per evitare problemi con lock orfani
+    await emergencyCleanupLocks();
     
     // Attendi un periodo casuale prima di tentare di acquisire il master lock
     // Aumenta il ritardo per ridurre i conflitti durante i deploy
@@ -419,7 +615,7 @@ async function acquireMasterLock() {
       logger.warn('Test di connessione a Telegram fallito, attesa prima di riprovare...');
       setTimeout(() => {
         if (!isShuttingDown) acquireMasterLock();
-      }, 30000 + Math.random() * 30000); // 30-60 secondi
+      }, 45000 + Math.random() * 30000); // 45-75 secondi
       return;
     }
     
@@ -441,7 +637,7 @@ async function acquireMasterLock() {
         // Attesa più lunga per dare tempo all'altra istanza di terminare
         setTimeout(() => {
           if (!isShuttingDown) acquireMasterLock();
-        }, 45000 + Math.random() * 45000); // 45-90 secondi
+        }, 60000 + Math.random() * 30000); // 60-90 secondi
         return;
       }
     }
@@ -521,15 +717,33 @@ async function acquireExecutionLock() {
   if (isShuttingDown) return; // Non tentare di acquisire il lock se lo shutdown è in corso
   
   try {
+    // Limita la frequenza dei tentativi
+    const now = Date.now();
+    const timeSinceLastAttempt = now - lastConnectionAttemptTime;
+    
+    if (timeSinceLastAttempt < CONNECTION_ATTEMPT_COOLDOWN) {
+      const waitTime = CONNECTION_ATTEMPT_COOLDOWN - timeSinceLastAttempt;
+      logger.info(`Tentativo recente (${Math.round(timeSinceLastAttempt/1000)}s fa), attendere altri ${Math.round(waitTime/1000)}s`);
+      
+      // Pianifica un nuovo tentativo dopo il cooldown
+      setTimeout(() => {
+        if (!isShuttingDown) acquireExecutionLock();
+      }, waitTime + Math.random() * 5000);
+      return;
+    }
+    
+    lastConnectionAttemptTime = now;
     logger.info(`Tentativo di acquisire il lock di esecuzione per l'istanza ${INSTANCE_ID}...`);
     
     // Prima verifica se possiamo connetterci a Telegram senza conflitti
     const canConnectToTelegram = await testTelegramConnection();
     if (!canConnectToTelegram) {
       logger.warn('Test di connessione a Telegram fallito prima di acquisire execution lock, attesa prima di riprovare...');
+      
+      // Attesa più lunga tra i tentativi
       setTimeout(() => {
         if (!isShuttingDown) acquireExecutionLock();
-      }, 30000 + Math.random() * 30000); // 30-60 secondi
+      }, 45000 + Math.random() * 30000); // 45-75 secondi
       return;
     }
     
@@ -669,8 +883,11 @@ function startExecutionLockHeartbeat() {
     if (isShuttingDown) return; // Non aggiornare il lock durante lo shutdown
     
     try {
+      // Prima pulisci eventuali lock di test obsoleti per prevenire problemi
+      await cleanupTelegramTestLocks();
+      
       // Usa executeWithLock per evitare operazioni concorrenti
-      await executeWithLock('execution_heartbeat', async () => {
+      const lockResult = await executeWithLock('execution_heartbeat', async () => {
         const lock = await Lock.findOne({ 
           name: 'execution_lock', 
           lock_type: 'execution',
@@ -682,28 +899,39 @@ function startExecutionLockHeartbeat() {
           lastHeartbeatTime = Date.now();
           await lock.save();
           logger.debug(`Heartbeat per lock di esecuzione inviato (${INSTANCE_ID})`);
+          return true;
         } else {
           logger.warn(`Lock di esecuzione non trovato durante heartbeat, tentativo di riacquisizione...`);
-          clearInterval(executionLockHeartbeatInterval);
-          executionLockHeartbeatInterval = null;
-          
-          // Se il bot è in esecuzione, fermalo
-          if (bot) {
-            try {
-              await stopBot();
-              logger.info(`Bot fermato per perdita del lock di esecuzione`);
-            } catch (err) {
-              logger.error(`Errore durante l'arresto del bot:`, err);
-            }
-          }
-          
-          // Tenta di riacquisire il lock di esecuzione
-          if (!isShuttingDown) {
-            // Attendi un po' prima di riprovare per non creare race conditions
-            setTimeout(acquireExecutionLock, 10000 + Math.random() * 10000);
+          return false;
+        }
+      }, 20000); // 20 secondi di timeout
+      
+      // Se non è stato possibile aggiornare il lock, prova a riacquisirlo
+      if (lockResult === false) {
+        clearInterval(executionLockHeartbeatInterval);
+        executionLockHeartbeatInterval = null;
+        
+        // Se il bot è in esecuzione, fermalo in modo sicuro
+        if (bot) {
+          try {
+            await stopBot();
+            logger.info(`Bot fermato per perdita del lock di esecuzione`);
+          } catch (err) {
+            logger.error(`Errore durante l'arresto del bot:`, err);
           }
         }
-      });
+        
+        // Attendi un po' prima di tentare di riacquisire il lock
+        setTimeout(async () => {
+          if (!isShuttingDown) {
+            // Pulisci eventuali lock obsoleti prima di riprovare
+            await cleanupTelegramTestLocks();
+            
+            // Tenta di riacquisire il lock di esecuzione
+            setTimeout(acquireExecutionLock, 5000 + Math.random() * 5000);
+          }
+        }, 5000);
+      }
     } catch (error) {
       logger.error(`Errore durante l'aggiornamento del lock di esecuzione:`, error);
     }
@@ -800,6 +1028,43 @@ function startLockCheck() {
 }
 
 /**
+ * Implementa un sistema di "keep-alive" per prevenire l'ibernazione
+ */
+function setupKeepAlive() {
+  // Inizializza un intervallo che esegue un'operazione leggera ogni 10 minuti
+  const keepAliveInterval = setInterval(async () => {
+    if (isShuttingDown) return;
+    
+    try {
+      logger.debug('Esecuzione keep-alive per prevenire ibernazione');
+      
+      // Esegui una query leggera sul database
+      const count = await User.countDocuments().limit(1);
+      
+      // Se il bot è attivo, invia un messaggio a te stesso (admin) ogni 4 ore
+      // per mantenere attiva la connessione Telegram
+      const now = new Date();
+      const hours = now.getHours();
+      const minutes = now.getMinutes();
+      
+      // Solo alle 4, 8, 12, 16, 20, 24 ore e solo se i minuti sono tra 0 e 5
+      if (hours % 4 === 0 && minutes >= 0 && minutes <= 5 && bot && config.ADMIN_USER_ID) {
+        try {
+          // Aggiorniamo lo stato del bot senza inviare un messaggio all'admin
+          await bot.getMe();
+        } catch (err) {
+          logger.warn('Errore nel keep-alive Telegram:', err);
+        }
+      }
+    } catch (err) {
+      logger.error('Errore nell\'esecuzione del keep-alive:', err);
+    }
+  }, 10 * 60 * 1000); // 10 minuti
+  
+  return keepAliveInterval;
+}
+
+/**
  * Rilascia tutti i lock per questa istanza
  */
 async function releaseAllLocks() {
@@ -852,6 +1117,105 @@ async function releaseAllLocks() {
 }
 
 /**
+ * Configura gli handler degli errori per il bot
+ * @param {Object} botInstance - Istanza del bot Telegram
+ */
+function setupBotErrorHandlers(botInstance) {
+  // Logging di eventi di polling
+  botInstance.on('polling_error', (error) => {
+    logger.error('❌ Errore di polling Telegram:', error);
+    
+    // Se l'errore è un conflitto (409), implementa un backoff esponenziale
+    if (error.code === 'ETELEGRAM' && error.message && error.message.includes('409 Conflict')) {
+      // Setta i flag di conflitto
+      telegramConflictDetected = true;
+      lastTelegramConflictTime = Date.now();
+      
+      logger.warn('Rilevato conflitto con altra istanza Telegram, gestione...');
+      pollingRetryCount++;
+      
+      // Se abbiamo troppi tentativi falliti, meglio terminare
+      if (pollingRetryCount > MAX_RETRY_COUNT) {
+        logger.warn(`Troppi tentativi falliti (${pollingRetryCount}), terminazione...`);
+        
+        // Immediato arresto del polling per evitare ulteriori errori
+        performShutdown('TELEGRAM_CONFLICT');
+        return;
+      }
+      
+      // Calcola il tempo di backoff esponenziale (tra 5 e 60 secondi)
+      const backoffTime = Math.min(5000 * Math.pow(2, pollingRetryCount) + Math.random() * 5000, 60000);
+      logger.info(`Attesa di ${Math.round(backoffTime/1000)} secondi prima di riprovare (tentativo ${pollingRetryCount})...`);
+      
+      // Ferma il polling attuale
+      stopBot().then(() => {
+        // Riprova dopo il backoff
+        setTimeout(() => {
+          if (!isShuttingDown) {
+            logger.info(`Tentativo di riconnessione #${pollingRetryCount}...`);
+            isBotStarting = false; // Reset del flag per permettere il riavvio
+            startBot(); // Riavvia il bot
+          }
+        }, backoffTime);
+      });
+      
+      return;
+    } 
+    // Nuova gestione specifica per gli errori di timeout del socket
+    else if (error.code === 'EFATAL' && error.message && 
+             (error.message.includes('ESOCKETTIMEDOUT') || 
+              error.message.includes('ETIMEDOUT') || 
+              error.message.includes('ECONNRESET'))) {
+      
+      logger.warn(`Rilevato errore di connessione ${error.message}, tentativo di ripristino leggero...`);
+      
+      // Incrementa un contatore di errori di rete
+      networkErrorCount = (networkErrorCount || 0) + 1;
+      
+      // Se ci sono troppi errori consecutivi, riavvia completamente
+      if (networkErrorCount > MAX_NETWORK_ERROR_COUNT) {
+        logger.warn(`Troppi errori di rete consecutivi (${networkErrorCount}), riavvio completo del bot...`);
+        stopBot().then(() => {
+          networkErrorCount = 0; // Reset del contatore
+          setTimeout(() => {
+            if (!isShuttingDown) {
+              isBotStarting = false;
+              startBot();
+            }
+          }, 15000);
+        });
+        return;
+      }
+      
+      // Per i primi errori, tenta solo un riavvio "leggero" del polling
+      try {
+        // Piccola pausa per far ripristinare le connessioni di rete
+        setTimeout(async () => {
+          if (bot && !isShuttingDown && !isPollingRestarting) {
+            await restartPolling();
+          }
+        }, 5000);
+      } catch (err) {
+        logger.error('Errore durante la gestione del timeout:', err);
+      }
+    }
+    else if (error.code === 'EFATAL' || error.code === 'EPARSE' || error.code === 'ETELEGRAM') {
+      // Per altri errori fatali, EPARSE o errori di Telegram, attendiamo un po' e ritentiamo
+      logger.warn(`Errore ${error.code}, tentatvo di ripartire il bot...`);
+      stopBot().then(() => {
+        // Attesa prima di riprovare
+        setTimeout(() => {
+          if (!isShuttingDown) {
+            isBotStarting = false;
+            startBot();
+          }
+        }, 15000);
+      });
+    }
+  });
+}
+
+/**
  * Funzione per il riavvio "leggero" del polling di Telegram
  * @returns {Promise<boolean>} - true se il riavvio è stato effettuato con successo
  */
@@ -869,14 +1233,38 @@ async function restartPolling() {
       return false;
     }
     
-    // Ferma il polling
-    await bot.stopPolling();
+    // MODIFICATO: Rimuovi tutti i listener prima di fermare il polling
+    bot.removeAllListeners('polling_error');
+    
+    // Ferma il polling con opzione cancel per forzare la chiusura
+    await bot.stopPolling({ cancel: true });
     
     // Attendi un po' per assicurarsi che il polling sia completamente fermato
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, 5000)); // Aumentato a 5 secondi
+    
+    // MODIFICATO: Verifica se ci sono conflitti prima di riavviare
+    const telegramStatus = await testTelegramConnection();
+    if (!telegramStatus) {
+      logger.warn('Rilevato possibile conflitto, attendo prima di riavviare polling');
+      isPollingRestarting = false;
+      
+      // Riprova un riavvio completo
+      setTimeout(() => {
+        if (!isShuttingDown) {
+          bot = null;
+          isBotStarting = false;
+          startBot();
+        }
+      }, 15000); // Attendi 15 secondi
+      
+      return false;
+    }
     
     // Avvia di nuovo il polling
     await bot.startPolling();
+    
+    // Aggiungi nuovamente gli handler
+    setupBotErrorHandlers(bot);
     
     logger.info('Polling Telegram riavviato con successo');
     isPollingRestarting = false;
@@ -897,10 +1285,17 @@ async function restartPolling() {
         if (!isShuttingDown) {
           startBot();
         }
-      }, 10000);
+      }, 15000); // Aumentato a 15 secondi
     } catch (err) {
       logger.error('Errore anche durante l\'arresto completo del bot:', err);
       isPollingRestarting = false;
+      
+      // MODIFICATO: Ultimo tentativo - forza la terminazione dell'istanza
+      setTimeout(() => {
+        if (!isShuttingDown) {
+          performShutdown('POLLING_FAILURE');
+        }
+      }, 5000);
     }
     
     return false;
@@ -923,7 +1318,15 @@ async function stopBot() {
     
     // Ferma il polling del bot
     logger.info('Arresto polling Telegram...');
-    await bot.stopPolling();
+    
+    // Rimuovi tutti i listener per evitare eventi durante lo shutdown
+    bot.removeAllListeners();
+    
+    try {
+      await bot.stopPolling({ cancel: true });
+    } catch (err) {
+      logger.error('Errore durante l\'arresto del polling:', err);
+    }
     
     // Attendi un po' per assicurarsi che il polling sia completamente fermato
     await new Promise(resolve => setTimeout(resolve, 5000));
@@ -981,6 +1384,9 @@ function startBot() {
       return;
     }
     
+    // Prima di avviare, pulisci i lock di test
+    await cleanupTelegramTestLocks();
+    
     // Avvia il bot
     await startBotImplementation();
   }).catch(err => {
@@ -1001,125 +1407,35 @@ async function startBotImplementation() {
     if (!telegramStatus) {
       logger.warn('Rilevato conflitto Telegram prima dell\'avvio del bot, attendiamo...');
       isBotStarting = false;
-      setTimeout(startBot, 30000 + Math.random() * 30000); // 30-60 secondi
+      setTimeout(startBot, 45000 + Math.random() * 30000); // 45-75 secondi
       return;
     }
     
     // Inizializzazione bot Telegram
     bot = new TelegramBot(config.BOT_TOKEN, { 
       polling: {
-        interval: 3000, // Increased from 2000 to 3000
-        timeout: 120, // Increased from 60 to 120 seconds
-        limit: 100,
-        retryTimeout: 20000, // Increased from 10000 to 20000
+        interval: 5000, // Aumentato a 5 secondi
+        timeout: 180, // Aumentato a 3 minuti
+        limit: 50, // Ridotto per diminuire il carico
+        retryTimeout: 30000, // 30 secondi
         autoStart: true
       },
-      polling_error_timeout: 30000, // Increased from 20000 to 30000
+      polling_error_timeout: 45000, // 45 secondi
       onlyFirstMatch: false,
       request: {
-        timeout: 90000, // Increased from 60000 to 90000
+        timeout: 180000, // 3 minuti
         agentOptions: {
           keepAlive: true,
-          keepAliveMsecs: 60000, // 1 minuto
-          maxSockets: 50,
-          maxFreeSockets: 10,
-          timeout: 90000 // Increased from 60000 to 90000
+          keepAliveMsecs: 120000, // 2 minuti
+          maxSockets: 25, // Ridotto per evitare troppi socket simultanei
+          maxFreeSockets: 5,
+          timeout: 180000 // 3 minuti
         }
       } 
     });
     
-    // Logging di eventi di polling
-    bot.on('polling_error', (error) => {
-      logger.error('❌ Errore di polling Telegram:', error);
-      
-      // Se l'errore è un conflitto (409), implementa un backoff esponenziale
-      if (error.code === 'ETELEGRAM' && error.message && error.message.includes('409 Conflict')) {
-        // Setta i flag di conflitto
-        telegramConflictDetected = true;
-        lastTelegramConflictTime = Date.now();
-        
-        logger.warn('Rilevato conflitto con altra istanza Telegram, gestione...');
-        pollingRetryCount++;
-        
-        // Se abbiamo troppi tentativi falliti, meglio terminare
-        if (pollingRetryCount > MAX_RETRY_COUNT) {
-          logger.warn(`Troppi tentativi falliti (${pollingRetryCount}), terminazione...`);
-          
-          // Immediato arresto del polling per evitare ulteriori errori
-          performShutdown('TELEGRAM_CONFLICT');
-          return;
-        }
-        
-        // Calcola il tempo di backoff esponenziale (tra 2 e 60 secondi)
-        const backoffTime = Math.min(2000 * Math.pow(2, pollingRetryCount) + Math.random() * 2000, 60000);
-        logger.info(`Attesa di ${Math.round(backoffTime/1000)} secondi prima di riprovare (tentativo ${pollingRetryCount})...`);
-        
-        // Ferma il polling attuale
-        stopBot().then(() => {
-          // Riprova dopo il backoff
-          setTimeout(() => {
-            if (!isShuttingDown) {
-              logger.info(`Tentativo di riconnessione #${pollingRetryCount}...`);
-              isBotStarting = false; // Reset del flag per permettere il riavvio
-              startBot(); // Riavvia il bot
-            }
-          }, backoffTime);
-        });
-        
-        return;
-      } 
-      // Nuova gestione specifica per gli errori di timeout del socket
-      else if (error.code === 'EFATAL' && error.message && 
-               (error.message.includes('ESOCKETTIMEDOUT') || 
-                error.message.includes('ETIMEDOUT') || 
-                error.message.includes('ECONNRESET'))) {
-        
-        logger.warn(`Rilevato errore di connessione ${error.message}, tentativo di ripristino leggero...`);
-        
-        // Incrementa un contatore di errori di rete
-        networkErrorCount = (networkErrorCount || 0) + 1;
-        
-        // Se ci sono troppi errori consecutivi, riavvia completamente
-        if (networkErrorCount > MAX_NETWORK_ERROR_COUNT) {
-          logger.warn(`Troppi errori di rete consecutivi (${networkErrorCount}), riavvio completo del bot...`);
-          stopBot().then(() => {
-            networkErrorCount = 0; // Reset del contatore
-            setTimeout(() => {
-              if (!isShuttingDown) {
-                isBotStarting = false;
-                startBot();
-              }
-            }, 10000);
-          });
-          return;
-        }
-        
-        // Per i primi errori, tenta solo un riavvio "leggero" del polling
-        try {
-          // Piccola pausa per far ripristinare le connessioni di rete
-          setTimeout(async () => {
-            if (bot && !isShuttingDown && !isPollingRestarting) {
-              await restartPolling();
-            }
-          }, 5000);
-        } catch (err) {
-          logger.error('Errore durante la gestione del timeout:', err);
-        }
-      }
-      else if (error.code === 'EFATAL' || error.code === 'EPARSE' || error.code === 'ETELEGRAM') {
-        // Per altri errori fatali, EPARSE o errori di Telegram, attendiamo un po' e ritentiamo
-        logger.warn(`Errore ${error.code}, tentatvo di ripartire il bot...`);
-        stopBot().then(() => {
-          // Attesa prima di riprovare
-          setTimeout(() => {
-            if (!isShuttingDown) {
-              isBotStarting = false;
-              startBot();
-            }
-          }, 10000);
-        });
-      }
-    });
+    // Configura gli handler di errore
+    setupBotErrorHandlers(bot);
     
     // Test della connessione a Telegram
     logger.info('Verifica connessione a Telegram...');
@@ -1209,7 +1525,7 @@ async function startBotImplementation() {
 }
 
 /**
- * Controlla se è stata inviata una notifica di avvio recentemente
+ * Controlla se è stato inviato un messaggio di notifica di avvio recentemente
  * @returns {Promise<boolean>} - true se è stata inviata una notifica nelle ultime 2 ore
  */
 async function checkLastStartupNotification() {
@@ -1285,6 +1601,11 @@ async function performShutdown(reason = 'NORMAL') {
       lockCheckInterval = null;
     }
     
+    if (keepAliveInterval) {
+      clearInterval(keepAliveInterval);
+      keepAliveInterval = null;
+    }
+    
     // Ferma il polling del bot PRIMA di rilasciare i lock
     // Questo è importante per evitare conflitti
     await stopBot();
@@ -1320,8 +1641,9 @@ async function performShutdown(reason = 'NORMAL') {
     
     // Chiudi la connessione a MongoDB
     try {
-      logger.info('Connessione al database chiusa');
+      logger.info('Chiusura connessione al database...');
       await mongoose.connection.close();
+      logger.info('Connessione al database chiusa');
     } catch (err) {
       logger.error('Errore nella chiusura della connessione MongoDB:', err);
     }
@@ -1338,6 +1660,46 @@ async function performShutdown(reason = 'NORMAL') {
     }, 1000);
   }
 }
+
+/**
+ * Implementa un sistema di "keep-alive" per prevenire l'ibernazione
+ */
+function setupKeepAlive() {
+  // Inizializza un intervallo che esegue un'operazione leggera ogni 10 minuti
+  const keepAliveInterval = setInterval(async () => {
+    if (isShuttingDown) return;
+    
+    try {
+      logger.debug('Esecuzione keep-alive per prevenire ibernazione');
+      
+      // Esegui una query leggera sul database
+      const count = await User.countDocuments().limit(1);
+      
+      // Se il bot è attivo, invia un messaggio a te stesso (admin) ogni 4 ore
+      // per mantenere attiva la connessione Telegram
+      const now = new Date();
+      const hours = now.getHours();
+      const minutes = now.getMinutes();
+      
+      // Solo alle 4, 8, 12, 16, 20, 24 ore e solo se i minuti sono tra 0 e 5
+      if (hours % 4 === 0 && minutes >= 0 && minutes <= 5 && bot && config.ADMIN_USER_ID) {
+        try {
+          // Aggiorniamo lo stato del bot senza inviare un messaggio all'admin
+          await bot.getMe();
+        } catch (err) {
+          logger.warn('Errore nel keep-alive Telegram:', err);
+        }
+      }
+    } catch (err) {
+      logger.error('Errore nell\'esecuzione del keep-alive:', err);
+    }
+  }, 10 * 60 * 1000); // 10 minuti
+  
+  return keepAliveInterval;
+}
+
+// Avvia il keep-alive
+keepAliveInterval = setupKeepAlive();
 
 // Gestione dei segnali del sistema operativo
 process.on('SIGINT', () => {
@@ -1374,5 +1736,9 @@ module.exports = {
   releaseTaskLock,
   executeWithLock,
   isActiveInstance,
-  restartPolling
+  restartPolling,
+  emergencyReleaseTelegram, 
+  emergencyCleanupLocks,
+  cleanupTelegramTestLocks,
+  INSTANCE_ID
 };
