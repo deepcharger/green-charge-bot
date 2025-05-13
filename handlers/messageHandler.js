@@ -65,12 +65,12 @@ function init(bot) {
   // Verifica connessione a Telegram
   try {
     logger.info('Testing Telegram connection...');
-    bot.getMe().then(async info => {  // <-- Modificato: aggiunto async
+    bot.getMe().then(async info => {
       logger.info(`Connected to Telegram as @${info.username}`);
       
       // Imposta i comandi del bot e attendi il completamento
       try {
-        await setupBotCommands(bot);  // <-- Modificato: aggiunto await
+        await setupBotCommands(bot);
       } catch (err) {
         logger.error('Error setting up bot commands:', err);
       }
@@ -493,11 +493,6 @@ function init(bot) {
     }
   });
 
-  // Gestisce errori generali
-  bot.on('polling_error', (error) => {
-    logger.error('Telegram polling error:', error);
-  });
-  
   logger.info('Message handlers initialized');
 }
 
