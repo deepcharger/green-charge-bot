@@ -1,11 +1,12 @@
 {
-  "name": "faircharge-bot",
+  "name": "green-charge-bot",
   "version": "1.0.0",
   "description": "Bot Telegram per gestire la coda delle colonnine di ricarica",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "lint": "eslint ."
   },
   "dependencies": {
     "node-telegram-bot-api": "^0.61.0",
