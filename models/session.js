@@ -36,4 +36,10 @@ const sessionSchema = new mongoose.Schema({
   }
 }, { timestamps: true });
 
+// Aggiungi indici per migliorare le prestazioni
+sessionSchema.index({ telegram_id: 1, status: 1 });
+sessionSchema.index({ status: 1, end_time: 1 });
+sessionSchema.index({ status: 1, reminded: 1, end_time: 1 });
+sessionSchema.index({ status: 1, timeout_notified: 1, end_time: 1 });
+
 module.exports = mongoose.model('Session', sessionSchema);
