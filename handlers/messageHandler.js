@@ -9,6 +9,55 @@ const Queue = require('../models/queue');
 const Session = require('../models/session');
 
 /**
+ * Verifica se l'utente è autorizzato a utilizzare il bot
+ * @param {Object} bot - Istanza del bot Telegram
+ * @param {Number} chatId - ID della chat
+ * @param {Number} userId - ID dell'utente
+ * @param {String} username - Username dell'utente
+ * @returns {Promise<Boolean>} - true se l'utente è autorizzato, false altrimenti
+ */
+async function isUserAuthorized(bot, chatId, userId, username) {
+  // Se non è attiva la restrizione al gruppo o è un admin, è sempre autorizzato
+  if (!config.RESTRICT_TO_GROUP || userId === config.ADMIN_USER_ID) {
+    return true;
+  }
+  
+  // Verifica se l'utente è membro del gruppo autorizzato
+  try {
+    // Ottieni lo stato dell'utente nel gruppo
+    const chatMember = await bot.getChatMember(config.AUTHORIZED_GROUP_ID, userId);
+    
+    // Verifica se lo stato è valido (member, administrator o creator)
+    if (['member', 'administrator', 'creator'].includes(chatMember.status)) {
+      logger.info(`User ${username} (${userId}) is authorized as ${chatMember.status} in group ${config.AUTHORIZED_GROUP_ID}`);
+      return true;
+    } else {
+      logger.warn(`User ${username} (${userId}) is not authorized. Status: ${chatMember.status}`);
+      return false;
+    }
+  } catch (error) {
+    // Se c'è un errore nella verifica, probabilmente l'utente non è nel gruppo
+    logger.error(`Error checking authorization for user ${username} (${userId}):`, error);
+    return false;
+  }
+}
+
+/**
+ * Invia un messaggio di accesso negato
+ * @param {Object} bot - Istanza del bot Telegram
+ * @param {Number} chatId - ID della chat
+ * @param {String} username - Username dell'utente
+ */
+function sendUnauthorizedMessage(bot, chatId, username) {
+  bot.sendMessage(chatId, 
+    `⚠️ *Accesso non autorizzato*\n\n` +
+    `Mi dispiace @${username}, ma per utilizzare questo bot devi essere un membro del gruppo autorizzato.\n\n` +
+    `Contatta l'amministratore per maggiori informazioni.`,
+    { parse_mode: 'Markdown' }
+  );
+}
+
+/**
  * Inizializza la gestione dei messaggi e comandi
  * @param {Object} bot - Istanza del bot Telegram
  */
@@ -37,6 +86,13 @@ function init(bot) {
     logger.info(`Received /start command from user ${userId} (${username})`);
 
     try {
+      // Verifica se l'utente è autorizzato
+      const isAuthorized = await isUserAuthorized(bot, chatId, userId, username);
+      if (!isAuthorized) {
+        sendUnauthorizedMessage(bot, chatId, username);
+        return;
+      }
+      
       await userHandler.registerUser(userId, username);
       
       const welcomeMessage = formatters.formatWelcomeMessage(username, userId);
@@ -58,6 +114,13 @@ function init(bot) {
     logger.info(`Received /prenota command from user ${userId} (${username})`);
     
     try {
+      // Verifica se l'utente è autorizzato
+      const isAuthorized = await isUserAuthorized(bot, chatId, userId, username);
+      if (!isAuthorized) {
+        sendUnauthorizedMessage(bot, chatId, username);
+        return;
+      }
+      
       const result = await queueHandler.requestCharge(userId, username);
       
       if (result.slotAvailable) {
@@ -84,6 +147,13 @@ function init(bot) {
     logger.info(`Received /cancella command from user ${userId} (${username})`);
     
     try {
+      // Verifica se l'utente è autorizzato
+      const isAuthorized = await isUserAuthorized(bot, chatId, userId, username);
+      if (!isAuthorized) {
+        sendUnauthorizedMessage(bot, chatId, username);
+        return;
+      }
+      
       // Verifica se l'utente è in coda
       const inQueue = await Queue.findOne({ telegram_id: userId });
       
@@ -139,6 +209,13 @@ function init(bot) {
     logger.info(`Received /iniziato command from user ${userId} (${username})`);
     
     try {
+      // Verifica se l'utente è autorizzato
+      const isAuthorized = await isUserAuthorized(bot, chatId, userId, username);
+      if (!isAuthorized) {
+        sendUnauthorizedMessage(bot, chatId, username);
+        return;
+      }
+      
       const session = await sessionHandler.startSession(userId, username);
       
       logger.info(`Session started for user ${userId}, slot ${session.slot_number}`);
@@ -165,6 +242,13 @@ function init(bot) {
     logger.info(`Received /terminato command from user ${userId} (${username})`);
     
     try {
+      // Verifica se l'utente è autorizzato
+      const isAuthorized = await isUserAuthorized(bot, chatId, userId, username);
+      if (!isAuthorized) {
+        sendUnauthorizedMessage(bot, chatId, username);
+        return;
+      }
+      
       const result = await sessionHandler.endSession(userId);
       
       logger.info(`Session ended for user ${userId}, duration: ${result.durationMinutes} minutes`);
@@ -189,10 +273,18 @@ function init(bot) {
   bot.onText(/\/status/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
+    const username = msg.from.username || `user${userId}`;
     
     logger.info(`Received /status command from user ${userId}`);
     
     try {
+      // Verifica se l'utente è autorizzato
+      const isAuthorized = await isUserAuthorized(bot, chatId, userId, username);
+      if (!isAuthorized) {
+        sendUnauthorizedMessage(bot, chatId, username);
+        return;
+      }
+      
       const status = await queueHandler.getSystemStatus();
       logger.info(`Retrieved system status, formatting message`);
       
@@ -211,13 +303,64 @@ function init(bot) {
   bot.onText(/\/help/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
+    const username = msg.from.username || `user${userId}`;
     
     logger.info(`Received /help command from user ${userId}`);
     
-    const message = formatters.formatHelpMessage();
+    try {
+      // Verifica se l'utente è autorizzato
+      const isAuthorized = await isUserAuthorized(bot, chatId, userId, username);
+      if (!isAuthorized) {
+        sendUnauthorizedMessage(bot, chatId, username);
+        return;
+      }
+      
+      const message = formatters.formatHelpMessage();
+      
+      bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      logger.info(`Sent help message to user ${userId}`);
+    } catch (error) {
+      logger.error(`Error in /help command from user ${userId}:`, error);
+      bot.sendMessage(chatId, `❌ Si è verificato un errore: ${error.message}`);
+    }
+  });
+
+  // Comando dove_sono (per ottenere l'ID della chat corrente)
+  bot.onText(/\/dove_sono/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const chatType = msg.chat.type;
+    const chatTitle = msg.chat.title || "Chat privata";
+    
+    logger.info(`Received /dove_sono command from user ${userId} in chat ${chatId} (${chatType})`);
+    
+    let message = `📍 *Informazioni sulla chat attuale*\n\n`;
+    
+    if (chatType === 'private') {
+      message += `Tipo: Chat privata con il bot\n`;
+      message += `ID: \`${chatId}\`\n\n`;
+      message += `Questo è l'ID della tua chat privata con il bot, non di un gruppo.`;
+    } else if (chatType === 'group' || chatType === 'supergroup') {
+      message += `Tipo: ${chatType === 'supergroup' ? 'Supergruppo' : 'Gruppo'}\n`;
+      message += `Nome: *${chatTitle}*\n`;
+      message += `ID: \`${chatId}\`\n\n`;
+      message += `🔍 Questo è l'ID di questo gruppo. Per configurare il bot per l'uso esclusivo in questo gruppo, ` +
+                 `l'amministratore del bot dovrà impostare questo ID nella configurazione.`;
+    } else {
+      message += `Tipo: ${chatType}\n`;
+      message += `ID: \`${chatId}\`\n`;
+    }
+    
+    // Aggiungi info per gli admin
+    if (userId === config.ADMIN_USER_ID) {
+      message += `\n\n👑 *Info per l'amministratore:*\n`;
+      message += `Per configurare il bot per l'uso esclusivo in questo gruppo, imposta le variabili d'ambiente:\n`;
+      message += `\`AUTHORIZED_GROUP_ID=${chatId}\`\n`;
+      message += `\`RESTRICT_TO_GROUP=true\``;
+    }
     
     bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-    logger.info(`Sent help message to user ${userId}`);
+    logger.info(`Sent location info to user ${userId} for chat ${chatId}`);
   });
 
   // Comando admin (solo per ADMIN_USER_ID)
@@ -366,7 +509,8 @@ async function setupBotCommands(bot) {
       { command: 'iniziato', description: 'Conferma l\'inizio della ricarica' },
       { command: 'terminato', description: 'Conferma la fine della ricarica' },
       { command: 'status', description: 'Visualizza lo stato attuale del sistema' },
-      { command: 'help', description: 'Mostra i comandi disponibili' }
+      { command: 'help', description: 'Mostra i comandi disponibili' },
+      { command: 'dove_sono', description: 'Mostra ID della chat corrente' }
     ]);
     
     logger.info('Bot commands updated successfully');
@@ -386,7 +530,8 @@ async function setupBotCommands(bot) {
           { command: 'admin_reset_system', description: 'Resetta completamente il sistema' },
           { command: 'admin_help', description: 'Mostra i comandi admin disponibili' },
           { command: 'dbtest', description: 'Verifica lo stato del database' },
-          { command: 'admin_update_commands', description: 'Aggiorna i comandi del bot' }
+          { command: 'admin_update_commands', description: 'Aggiorna i comandi del bot' },
+          { command: 'dove_sono', description: 'Mostra ID della chat corrente' }
         ], { scope: { type: 'chat', chat_id: config.ADMIN_USER_ID } });
         
         logger.info('Admin commands updated successfully');
