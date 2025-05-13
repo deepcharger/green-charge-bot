@@ -25,12 +25,4 @@ const taskLockSchema = new mongoose.Schema({
   },
   expires_at: {
     type: Date,
-    required: true,
-    expires: 0 // TTL index, rimuove automaticamente i documenti scaduti
-  }
-});
-
-// Indice composto per velocizzare la ricerca per nome e scadenza
-taskLockSchema.index({ task_name: 1, expires_at: 1 });
-
-module.exports = mongoose.model('TaskLock', taskLockSchema);
+    require
