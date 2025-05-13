@@ -1,16 +1,29 @@
 const TelegramBot = require('node-telegram-bot-api');
 const mongoose = require('mongoose');
-const { v4: uuidv4 } = require('uuid'); // Aggiungi questa dipendenza al package.json
+const fs = require('fs');
+const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 const config = require('./config');
 const messageHandler = require('./handlers/messageHandler');
 const notifier = require('./utils/notifier');
 const logger = require('./utils/logger');
-const Lock = require('./models/lock'); // Importa il modello Lock
+const Lock = require('./models/lock');
+const StartupNotification = require('./models/startupNotification');
+const LocalLockManager = require('./utils/localLockManager');
+const InstanceTracker = require('./utils/instanceTracker');
 
 // Genera un ID univoco per questa istanza del bot
-const INSTANCE_ID = uuidv4();
+const INSTANCE_ID = `instance_${Date.now()}_${uuidv4().split('-')[0]}`;
+const localLockManager = new LocalLockManager(INSTANCE_ID);
+const instanceTracker = new InstanceTracker(INSTANCE_ID);
+
 let bot = null;
-let lockHeartbeatInterval = null;
+let masterLockHeartbeatInterval = null;
+let executionLockHeartbeatInterval = null;
+let lockCheckInterval = null;
+
+// Timeout per la terminazione (ms)
+const SHUTDOWN_TIMEOUT = 5000;
 
 // Logging all'avvio
 logger.info('====== AVVIO BOT GREEN-CHARGE ======');
@@ -30,147 +43,376 @@ logger.info('Tentativo di connessione a MongoDB...');
 mongoose.connect(config.MONGODB_URI)
   .then(() => {
     logger.info('✅ Connessione a MongoDB riuscita');
-    acquireLock();
+    initializeBot();
   })
   .catch(err => {
     logger.error('❌ Errore di connessione a MongoDB:', err);
-    logger.error(`URI MongoDB: ${config.MONGODB_URI.replace(/\/\/([^:]+):([^@]+)@/, '//****:****@')}`); // Nasconde credenziali nei log
+    logger.error(`URI MongoDB: ${config.MONGODB_URI.replace(/\/\/([^:]+):([^@]+)@/, '//****:****@')}`);
     process.exit(1);
   });
 
 /**
- * Tenta di acquisire un lock per questa istanza del bot
+ * Avvia la sequenza di inizializzazione del bot
  */
-async function acquireLock() {
+async function initializeBot() {
   try {
-    logger.info(`Tentativo di acquisizione lock per istanza ${INSTANCE_ID}...`);
+    // Attendi un periodo casuale prima di tentare di acquisire il master lock
+    // Questo aiuta a prevenire race condition durante i deploy multipli
+    const delayMs = 15000 + Math.floor(Math.random() * 10000); // tra 15 e 25 secondi
+    logger.info(`Attesa di ${delayMs}ms prima di tentare di acquisire il master lock...`);
+    await new Promise(resolve => setTimeout(resolve, delayMs));
     
-    // Controlla se esiste già un lock valido
-    const existingLock = await Lock.findOne({ name: 'bot_lock' });
+    // Tenta di acquisire il master lock
+    await acquireMasterLock();
+  } catch (error) {
+    logger.error('❌ Errore critico durante l\'inizializzazione:', error);
+    await performShutdown('INIT_ERROR');
+  }
+}
+
+/**
+ * Tenta di acquisire il master lock
+ * Il master lock è un lock esclusivo che determina quale istanza ha il diritto di provare ad acquisire il lock di esecuzione
+ * Solo una istanza alla volta può avere il master lock
+ */
+async function acquireMasterLock() {
+  try {
+    logger.info(`Tentativo di acquisire il master lock per l'istanza ${INSTANCE_ID}...`);
     
-    if (existingLock) {
-      // Verifica se il lock è scaduto (nessun heartbeat per più di 30 secondi)
+    // Verifica se c'è già un'istanza attiva con un lock di esecuzione
+    const activeLock = await Lock.findOne({ 
+      lock_type: 'execution',
+      last_heartbeat: { $gt: new Date(Date.now() - 30000) } // Consideriamo attivi i lock con heartbeat negli ultimi 30 secondi
+    });
+    
+    if (activeLock) {
+      // Se c'è già un'istanza attiva, termina questa istanza
+      logger.info(`Rilevato un lock di esecuzione attivo: ${activeLock.instance_id}`);
+      logger.info(`L'istanza ${activeLock.instance_id} è attiva e ha il lock di esecuzione. Termino questa istanza.`);
+      await performShutdown('DUPLICATE_INSTANCE');
+      return;
+    }
+    
+    // Verifica se esiste già un master lock valido
+    const masterLock = await Lock.findOne({ 
+      name: 'master_lock',
+      lock_type: 'master'
+    });
+    
+    if (masterLock) {
+      // Verifica se il master lock è scaduto
       const now = new Date();
-      const lockTimeDiff = now - existingLock.last_heartbeat;
+      const lockTimeDiff = now - masterLock.last_heartbeat;
       
       if (lockTimeDiff > 30000) { // 30 secondi
-        logger.warn(`Lock esistente scaduto (${lockTimeDiff}ms), acquisizione forzata`);
-        await Lock.deleteOne({ name: 'bot_lock' });
+        logger.warn(`Master lock esistente scaduto (${lockTimeDiff}ms), acquisizione forzata`);
+        await Lock.deleteOne({ name: 'master_lock', lock_type: 'master' });
       } else {
-        // Se c'è già un lock attivo e non è questa istanza, attendere e riprovare
-        if (existingLock.instance_id !== INSTANCE_ID) {
-          logger.info(`Lock già acquisito da un'altra istanza (${existingLock.instance_id}), attesa di 5 secondi...`);
-          setTimeout(acquireLock, 5000);
+        // Se c'è già un master lock attivo e non è di questa istanza, attendere e riprovare
+        if (masterLock.instance_id !== INSTANCE_ID) {
+          logger.info(`Master lock già acquisito da un'altra istanza (${masterLock.instance_id}), attesa di 10 secondi...`);
+          setTimeout(acquireMasterLock, 10000);
           return;
         } else {
-          // Se il lock è già di questa istanza (caso improbabile), lo aggiorniamo
-          logger.info(`Lock già nostro, aggiornamento heartbeat`);
-          existingLock.last_heartbeat = now;
-          await existingLock.save();
-          startBot();
+          // Se il master lock è già di questa istanza, lo aggiorniamo
+          logger.info(`Master lock già nostro, aggiornamento heartbeat`);
+          masterLock.last_heartbeat = now;
+          await masterLock.save();
+          
+          // Procediamo con l'acquisizione del lock di esecuzione
+          await acquireExecutionLock();
           return;
         }
       }
     }
     
-    // Creazione del lock
+    // Creazione del master lock
     const lock = new Lock({
-      name: 'bot_lock',
+      name: 'master_lock',
+      lock_type: 'master',
       instance_id: INSTANCE_ID,
       created_at: new Date(),
       last_heartbeat: new Date()
     });
     
     await lock.save();
-    logger.info(`✅ Lock acquisito con successo per istanza ${INSTANCE_ID}`);
+    logger.info(`Master lock acquisito con successo da ${INSTANCE_ID}`);
     
-    // Avvia heartbeat per mantenere il lock
-    startLockHeartbeat();
+    // Avvia il heartbeat per il master lock
+    startMasterLockHeartbeat();
     
-    // Avvia il bot
-    startBot();
+    // Procedi con l'acquisizione del lock di esecuzione
+    await acquireExecutionLock();
   } catch (error) {
-    logger.error(`Errore durante l'acquisizione del lock:`, error);
-    // In caso di errore, riprova dopo 5 secondi
-    setTimeout(acquireLock, 5000);
+    logger.error(`Errore durante l'acquisizione del master lock:`, error);
+    // In caso di errore, riprova dopo 10 secondi
+    setTimeout(acquireMasterLock, 10000);
   }
 }
 
 /**
- * Avvia un interval per aggiornare periodicamente il lock
+ * Tenta di acquisire il lock di esecuzione
+ * Il lock di esecuzione determina quale istanza può effettivamente eseguire il bot
  */
-function startLockHeartbeat() {
-  if (lockHeartbeatInterval) {
-    clearInterval(lockHeartbeatInterval);
+async function acquireExecutionLock() {
+  try {
+    logger.info(`Tentativo di acquisire il lock di esecuzione per l'istanza ${INSTANCE_ID}...`);
+    
+    // Verifica se esiste già un lock di esecuzione valido
+    const executionLock = await Lock.findOne({ 
+      name: 'execution_lock',
+      lock_type: 'execution'
+    });
+    
+    if (executionLock) {
+      // Verifica se il lock di esecuzione è scaduto
+      const now = new Date();
+      const lockTimeDiff = now - executionLock.last_heartbeat;
+      
+      if (lockTimeDiff > 30000) { // 30 secondi
+        logger.warn(`Lock di esecuzione esistente scaduto (${lockTimeDiff}ms), acquisizione forzata`);
+        await Lock.deleteOne({ name: 'execution_lock', lock_type: 'execution' });
+      } else {
+        // Se c'è già un lock di esecuzione attivo e non è di questa istanza, attendere e riprovare
+        if (executionLock.instance_id !== INSTANCE_ID) {
+          logger.info(`Lock di esecuzione già acquisito da un'altra istanza (${executionLock.instance_id}), attesa di 10 secondi...`);
+          setTimeout(acquireExecutionLock, 10000);
+          return;
+        } else {
+          // Se il lock di esecuzione è già di questa istanza, lo aggiorniamo
+          logger.info(`Lock di esecuzione già nostro, aggiornamento heartbeat`);
+          executionLock.last_heartbeat = now;
+          await executionLock.save();
+          
+          // Procediamo con l'avvio del bot
+          startBot();
+          return;
+        }
+      }
+    }
+    
+    // Creazione del lock di esecuzione
+    const lock = new Lock({
+      name: 'execution_lock',
+      lock_type: 'execution',
+      instance_id: INSTANCE_ID,
+      created_at: new Date(),
+      last_heartbeat: new Date()
+    });
+    
+    await lock.save();
+    logger.info(`Lock di esecuzione acquisito con successo da ${INSTANCE_ID}`);
+    
+    // Crea anche un lock file locale
+    if (localLockManager.createLockFile()) {
+      logger.debug(`Lock file locale creato`);
+    } else {
+      logger.warn(`Impossibile creare lock file locale`);
+    }
+    
+    // Avvia il heartbeat per il lock di esecuzione
+    startExecutionLockHeartbeat();
+    
+    // Avvia il controllo periodico del lock
+    startLockCheck();
+    
+    // Procedi con l'avvio del bot
+    startBot();
+  } catch (error) {
+    logger.error(`Errore durante l'acquisizione del lock di esecuzione:`, error);
+    // In caso di errore, riprova dopo 10 secondi
+    setTimeout(acquireExecutionLock, 10000);
+  }
+}
+
+/**
+ * Avvia un interval per aggiornare periodicamente il master lock
+ */
+function startMasterLockHeartbeat() {
+  if (masterLockHeartbeatInterval) {
+    clearInterval(masterLockHeartbeatInterval);
   }
   
-  lockHeartbeatInterval = setInterval(async () => {
+  masterLockHeartbeatInterval = setInterval(async () => {
     try {
-      const lock = await Lock.findOne({ name: 'bot_lock', instance_id: INSTANCE_ID });
+      const lock = await Lock.findOne({ 
+        name: 'master_lock', 
+        lock_type: 'master',
+        instance_id: INSTANCE_ID 
+      });
+      
       if (lock) {
         lock.last_heartbeat = new Date();
         await lock.save();
-        logger.debug(`Heartbeat per lock inviato (${INSTANCE_ID})`);
+        logger.debug(`Heartbeat per master lock inviato (${INSTANCE_ID})`);
       } else {
-        logger.warn(`Lock non trovato durante heartbeat, tentativo di riacquisizione...`);
-        clearInterval(lockHeartbeatInterval);
-        lockHeartbeatInterval = null;
+        logger.warn(`Master lock non trovato durante heartbeat, tentativo di riacquisizione...`);
+        clearInterval(masterLockHeartbeatInterval);
+        masterLockHeartbeatInterval = null;
         
-        // Se il bot è in esecuzione, fermalo
-        if (bot) {
-          try {
-            bot.stopPolling();
-            bot = null;
-            logger.info(`Bot fermato per perdita del lock`);
-          } catch (err) {
-            logger.error(`Errore durante l'arresto del bot:`, err);
-          }
-        }
-        
-        // Tenta di riacquisire il lock
-        acquireLock();
+        // Tenta di riacquisire il master lock
+        setTimeout(acquireMasterLock, 5000);
       }
     } catch (error) {
-      logger.error(`Errore durante l'aggiornamento del lock:`, error);
+      logger.error(`Errore durante l'aggiornamento del master lock:`, error);
     }
   }, 15000); // Aggiorna ogni 15 secondi
 }
 
 /**
- * Rilascia il lock (da chiamare durante lo shutdown)
+ * Avvia un interval per aggiornare periodicamente il lock di esecuzione
  */
-async function releaseLock() {
+function startExecutionLockHeartbeat() {
+  if (executionLockHeartbeatInterval) {
+    clearInterval(executionLockHeartbeatInterval);
+  }
+  
+  executionLockHeartbeatInterval = setInterval(async () => {
+    try {
+      const lock = await Lock.findOne({ 
+        name: 'execution_lock', 
+        lock_type: 'execution',
+        instance_id: INSTANCE_ID 
+      });
+      
+      if (lock) {
+        lock.last_heartbeat = new Date();
+        await lock.save();
+        logger.debug(`Heartbeat per lock di esecuzione inviato (${INSTANCE_ID})`);
+      } else {
+        logger.warn(`Lock di esecuzione non trovato durante heartbeat, tentativo di riacquisizione...`);
+        clearInterval(executionLockHeartbeatInterval);
+        executionLockHeartbeatInterval = null;
+        
+        // Se il bot è in esecuzione, fermalo
+        if (bot) {
+          try {
+            await bot.stopPolling();
+            bot = null;
+            logger.info(`Bot fermato per perdita del lock di esecuzione`);
+          } catch (err) {
+            logger.error(`Errore durante l'arresto del bot:`, err);
+          }
+        }
+        
+        // Tenta di riacquisire il lock di esecuzione
+        setTimeout(acquireExecutionLock, 5000);
+      }
+    } catch (error) {
+      logger.error(`Errore durante l'aggiornamento del lock di esecuzione:`, error);
+    }
+  }, 10000); // Aggiorna ogni 10 secondi
+}
+
+/**
+ * Avvia un interval per controllare periodicamente lo stato dei lock
+ */
+function startLockCheck() {
+  if (lockCheckInterval) {
+    clearInterval(lockCheckInterval);
+  }
+  
+  lockCheckInterval = setInterval(async () => {
+    try {
+      // Verifica che il lock file locale sia ancora valido
+      if (!localLockManager.checkLockFile()) {
+        logger.warn(`Lock file locale non valido o mancante, tentativo di riacquisizione...`);
+        
+        // Tenta di ricreare il lock file locale
+        if (localLockManager.createLockFile()) {
+          logger.info(`Lock file locale ricreato con successo`);
+        } else {
+          logger.error(`Impossibile ricreare lock file locale`);
+          // Potrebbe essere necessario un riavvio completo in questo caso
+          await performShutdown('LOCAL_LOCK_ERROR');
+        }
+      }
+      
+      // Verifica che entrambi i lock siano ancora validi
+      const masterLock = await Lock.findOne({ 
+        name: 'master_lock', 
+        lock_type: 'master',
+        instance_id: INSTANCE_ID 
+      });
+      
+      const executionLock = await Lock.findOne({ 
+        name: 'execution_lock', 
+        lock_type: 'execution',
+        instance_id: INSTANCE_ID 
+      });
+      
+      if (!masterLock) {
+        logger.warn(`Master lock perso, tentativo di riacquisizione...`);
+        await performShutdown('LOST_MASTER_LOCK');
+      }
+      
+      if (!executionLock) {
+        logger.warn(`Lock di esecuzione perso, tentativo di riacquisizione...`);
+        await performShutdown('LOST_EXECUTION_LOCK');
+      }
+    } catch (error) {
+      logger.error(`Errore durante il controllo dei lock:`, error);
+    }
+  }, 60000); // Controlla ogni 60 secondi
+}
+
+/**
+ * Rilascia tutti i lock per questa istanza
+ */
+async function releaseAllLocks() {
   try {
-    // Interrompe l'heartbeat
-    if (lockHeartbeatInterval) {
-      clearInterval(lockHeartbeatInterval);
-      lockHeartbeatInterval = null;
+    logger.info(`Rilascio di tutti i lock per l'istanza ${INSTANCE_ID}...`);
+    
+    // Rilascia il lock di esecuzione
+    const executionLockResult = await Lock.deleteOne({ 
+      name: 'execution_lock', 
+      lock_type: 'execution',
+      instance_id: INSTANCE_ID 
+    });
+    
+    if (executionLockResult.deletedCount > 0) {
+      logger.info(`Lock di esecuzione rilasciato da ${INSTANCE_ID}`);
+    } else {
+      logger.info(`Nessun lock di esecuzione da rilasciare per ${INSTANCE_ID}`);
     }
     
-    // Elimina il lock dal database
-    await Lock.deleteOne({ name: 'bot_lock', instance_id: INSTANCE_ID });
-    logger.info(`Lock rilasciato per istanza ${INSTANCE_ID}`);
+    // Rilascia il master lock
+    const masterLockResult = await Lock.deleteOne({ 
+      name: 'master_lock', 
+      lock_type: 'master',
+      instance_id: INSTANCE_ID 
+    });
+    
+    if (masterLockResult.deletedCount > 0) {
+      logger.info(`Master lock rilasciato da ${INSTANCE_ID}`);
+    } else {
+      logger.info(`Nessun master lock da rilasciare per ${INSTANCE_ID}`);
+    }
+    
+    // Rimuovi il lock file locale
+    localLockManager.removeLockFile();
     
     return true;
   } catch (error) {
-    logger.error(`Errore durante il rilascio del lock:`, error);
+    logger.error(`Errore durante il rilascio dei lock:`, error);
     return false;
   }
 }
 
+/**
+ * Avvia il bot Telegram
+ */
 function startBot() {
   try {
-    logger.info('Inizializzazione bot Telegram...');
+    logger.info('Avvio del bot...');
     
     // Inizializzazione bot Telegram
     bot = new TelegramBot(config.BOT_TOKEN, { 
       polling: true,
-      // Aggiungi parametri per gestione errori polling
       polling_error_timeout: 10000,
       onlyFirstMatch: false,
       request: {
         timeout: 30000,
-        // Aggiungi agent per debug
         agentOptions: {
           keepAlive: true
         }
@@ -183,15 +425,17 @@ function startBot() {
       
       // Se l'errore è un conflitto (409), rilasciamo il lock e terminiamo l'istanza
       if (error.code === 'ETELEGRAM' && error.message && error.message.includes('409 Conflict')) {
-        logger.warn('Rilevato conflitto con altra istanza, rilascio lock e terminazione...');
+        logger.warn('Rilevato conflitto con altra istanza Telegram, terminazione...');
         
-        releaseLock().then(() => {
-          logger.info('Terminazione processo in corso dopo conflitto...');
-          process.exit(0);
-        }).catch(() => {
-          logger.error('Terminazione forzata processo dopo conflitto...');
-          process.exit(1);
-        });
+        // Immediato arresto del polling per evitare ulteriori errori
+        try {
+          bot.stopPolling();
+        } catch (err) {
+          logger.error('Errore nell\'arresto del polling:', err);
+        }
+        
+        // Termina l'istanza
+        performShutdown('TELEGRAM_CONFLICT');
       }
     });
     
@@ -200,18 +444,33 @@ function startBot() {
     bot.getMe().then(info => {
       logger.info(`✅ Bot connesso correttamente come @${info.username} (ID: ${info.id})`);
       
-      // Ping di prova per verificare che tutto funzioni
-      if (config.ADMIN_USER_ID) {
-        logger.info(`Tentativo di invio messaggio di avvio all'admin ${config.ADMIN_USER_ID}...`);
-        bot.sendMessage(config.ADMIN_USER_ID, 
-          `🤖 *Green-Charge Bot avviato*\n\nIl bot è ora online e pronto all'uso.\n\nVersione: 1.0.0\nAvviato: ${new Date().toLocaleString('it-IT')}\nID Istanza: ${INSTANCE_ID}`,
-          { parse_mode: 'Markdown' })
-          .then(() => logger.info('✅ Messaggio di avvio inviato all\'admin'))
-          .catch(err => logger.warn('⚠️ Impossibile inviare messaggio all\'admin:', err.message));
-      }
+      // Controlla se è stata inviata una notifica di avvio nelle ultime 2 ore
+      checkLastStartupNotification().then(recentlyNotified => {
+        // Se non c'è stata una notifica recente e l'admin è configurato, invia il messaggio
+        if (!recentlyNotified && config.ADMIN_USER_ID) {
+          logger.info(`Tentativo di invio messaggio di avvio all'admin ${config.ADMIN_USER_ID}...`);
+          bot.sendMessage(config.ADMIN_USER_ID, 
+            `🤖 *Green-Charge Bot avviato*\n\n` +
+            `Il bot è ora online e pronto all'uso.\n\n` +
+            `Versione: 1.0.0\n` +
+            `Avviato: ${new Date().toLocaleString('it-IT')}\n` +
+            `ID Istanza: ${INSTANCE_ID}`,
+            { parse_mode: 'Markdown' })
+            .then(() => {
+              logger.info('✅ Messaggio di avvio inviato all\'admin');
+              // Salva il timestamp della notifica
+              saveStartupNotification('startup', 'Bot avviato con successo');
+            })
+            .catch(err => logger.warn('⚠️ Impossibile inviare messaggio all\'admin:', err.message));
+        } else {
+          logger.info('Notifica di avvio recente, messaggio non inviato');
+        }
+      }).catch(err => {
+        logger.warn('Errore nel controllo notifiche di avvio:', err);
+      });
     }).catch(err => {
       logger.error('❌ Errore nella connessione a Telegram:', err);
-      logger.error(`Token bot: ${config.BOT_TOKEN.substring(0, 5)}...${config.BOT_TOKEN.substring(config.BOT_TOKEN.length - 5)}`); // Mostra solo parte del token
+      logger.error(`Token bot: ${config.BOT_TOKEN.substring(0, 5)}...${config.BOT_TOKEN.substring(config.BOT_TOKEN.length - 5)}`);
     });
 
     // Gestione messaggi e comandi
@@ -232,62 +491,145 @@ function startBot() {
   } catch (error) {
     logger.error('❌ Errore critico durante l\'avvio del bot:', error);
     logger.error('Stack trace:', error.stack);
-    releaseLock().then(() => process.exit(1));
+    performShutdown('BOT_STARTUP_ERROR');
   }
 }
 
-// Gestione graceful shutdown
-process.on('SIGINT', async () => {
-  logger.info('Segnale SIGINT ricevuto, spegnimento bot in corso...');
-  await performShutdown();
-});
-
-process.on('SIGTERM', async () => {
-  logger.info('Segnale SIGTERM ricevuto, spegnimento bot in corso...');
-  await performShutdown();
-});
-
-// Funzione di shutdown comune
-async function performShutdown() {
+/**
+ * Controlla se è stata inviata una notifica di avvio recentemente
+ * @returns {Promise<boolean>} - true se è stata inviata una notifica nelle ultime 2 ore
+ */
+async function checkLastStartupNotification() {
   try {
-    // Rilascia il lock
-    logger.info('Rilascio lock...');
-    await releaseLock();
+    // Cerca notifiche nelle ultime 2 ore
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const recentNotification = await StartupNotification.findOne({
+      timestamp: { $gt: twoHoursAgo },
+      notification_type: 'startup'
+    });
+    
+    return !!recentNotification;
+  } catch (error) {
+    logger.error('Errore nel controllo delle notifiche di avvio:', error);
+    // In caso di errore, assumiamo che non ci siano notifiche recenti
+    return false;
+  }
+}
+
+/**
+ * Salva un record per la notifica di avvio
+ * @param {string} type - Tipo di notifica ('startup', 'shutdown', 'error')
+ * @param {string} message - Messaggio associato alla notifica
+ */
+async function saveStartupNotification(type = 'startup', message = '') {
+  try {
+    // Crea un nuovo record di notifica
+    const notification = new StartupNotification({
+      instance_id: INSTANCE_ID,
+      notification_type: type,
+      message: message
+    });
+    
+    await notification.save();
+    logger.info(`Notifica di ${type} salvata`);
+  } catch (error) {
+    logger.error(`Errore nel salvataggio della notifica di ${type}:`, error);
+  }
+}
+
+/**
+ * Esegue un processo di shutdown controllato
+ * @param {string} reason - Motivo dello shutdown
+ */
+async function performShutdown(reason = 'NORMAL') {
+  // Controlla se è già in corso una terminazione
+  if (instanceTracker.isTerminating) {
+    logger.info(`Terminazione già in corso (${instanceTracker.terminationReason}), ignorando la richiesta di terminazione per ${reason}`);
+    return;
+  }
+  
+  // Imposta lo stato di terminazione
+  instanceTracker.startTermination(reason);
+  logger.info(`Bot in fase di terminazione (${reason})`);
+  
+  try {
+    // Ferma tutti gli intervalli
+    if (masterLockHeartbeatInterval) {
+      clearInterval(masterLockHeartbeatInterval);
+      masterLockHeartbeatInterval = null;
+    }
+    
+    if (executionLockHeartbeatInterval) {
+      clearInterval(executionLockHeartbeatInterval);
+      executionLockHeartbeatInterval = null;
+    }
+    
+    if (lockCheckInterval) {
+      clearInterval(lockCheckInterval);
+      lockCheckInterval = null;
+    }
+    
+    // Rilascia tutti i lock
+    await releaseAllLocks();
     
     // Ferma il polling del bot
     if (bot) {
       logger.info('Arresto polling Telegram...');
-      await bot.stopPolling();
+      try {
+        await bot.stopPolling();
+      } catch (error) {
+        logger.error('Errore durante l\'arresto del polling:', error);
+      }
     }
     
-    // Chiudi la connessione a MongoDB
-    logger.info('Chiusura connessione MongoDB...');
-    await mongoose.connection.close();
-    logger.info('Connessione MongoDB chiusa');
+    // Registra informazioni sull'istanza
+    logger.info(`L'istanza ha tentato ${instanceTracker.restartCount} riavvii durante il ciclo di vita`);
     
-    // Termina il processo
-    process.exit(0);
+    // Salva notifica di shutdown
+    await saveStartupNotification('shutdown', `Terminazione: ${reason}`);
+    
+    // Chiudi la connessione a MongoDB
+    logger.info('Connessione al database chiusa');
+    await mongoose.connection.close();
+    
+    // Aggiungi un ritardo prima della terminazione per far completare tutte le operazioni pendenti
+    logger.info(`Uscita con codice 0 dopo ${SHUTDOWN_TIMEOUT}ms`);
+    setTimeout(() => {
+      process.exit(0);
+    }, SHUTDOWN_TIMEOUT);
   } catch (error) {
     logger.error('Errore durante lo shutdown:', error);
-    process.exit(1);
+    setTimeout(() => {
+      process.exit(1);
+    }, 1000);
   }
 }
 
-// Gestione uncaught exceptions
-process.on('uncaughtException', async (err) => {
+// Gestione dei segnali del sistema operativo
+process.on('SIGINT', () => {
+  logger.info('Segnale SIGINT ricevuto, spegnimento bot in corso...');
+  performShutdown('SIGINT');
+});
+
+process.on('SIGTERM', () => {
+  logger.info('Segnale SIGTERM ricevuto, spegnimento bot in corso...');
+  performShutdown('SIGTERM');
+});
+
+// Gestione eccezioni non catturate
+process.on('uncaughtException', (err) => {
   logger.error('❌ Eccezione non gestita:', err);
   logger.error('Stack trace:', err.stack);
   logger.logMemoryUsage();
   
-  // Se è un'eccezione grave, rilascia il lock e termina
-  await releaseLock();
-  process.exit(1);
+  // Se è un'eccezione grave, rilascia i lock e termina
+  performShutdown('UNCAUGHT_EXCEPTION');
 });
 
-// Gestione unhandled rejections
-process.on('unhandledRejection', async (reason, promise) => {
+// Gestione promise rejection non gestite
+process.on('unhandledRejection', (reason, promise) => {
   logger.error('❌ Promise rejection non gestita:', reason);
   logger.logMemoryUsage();
   
-  // Per le rejection non terminiamo il processo, ma logghiamo solamente
+  // Solo log, non terminiamo l'istanza per una promise non gestita
 });
