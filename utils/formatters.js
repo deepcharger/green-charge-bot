@@ -85,10 +85,11 @@ function formatStatusMessage(status) {
 
 /**
  * Genera un messaggio di aiuto formattato
+ * @param {Boolean} isAdmin - Indica se l'utente è admin
  * @returns {String} - Messaggio formattato
  */
-function formatHelpMessage() {
-  return `
+function formatHelpMessage(isAdmin = false) {
+  let message = `
 🔋 *Guida a Green-Charge* 🔋
 
 *Come ricaricare il tuo veicolo:*
@@ -116,21 +117,19 @@ function formatHelpMessage() {
 ❌ */cancella* - Rinuncia al tuo posto in coda
 📊 */status* - Verifica quali colonnine sono libere/occupate 
 ❓ */help* - Visualizza questa guida
+📍 */dove_sono* - Mostra l'ID della chat attuale
 
 *Consigli:*
-• Ricevuta la notifica, hai 5 minuti per iniziare
-• Se cambi idea o hai un imprevisto, usa */cancella* per liberare il posto
-• Rispetta il tempo massimo di 30 minuti per la cortesia di tutti
+- Ricevuta la notifica, hai 5 minuti per iniziare
+- Se cambi idea o hai un imprevisto, usa */cancella* per liberare il posto
+- Rispetta il tempo massimo di 30 minuti per la cortesia di tutti
 `;
-}
 
-/**
- * Genera un messaggio di aiuto per amministratori
- * @returns {String} - Messaggio formattato
- */
-function formatAdminHelpMessage() {
-  return `
-🔧 *Comandi Amministratore* 🔧
+  // Aggiungi le istruzioni per l'admin se l'utente è admin
+  if (isAdmin) {
+    message += `
+
+🔧 *COMANDI AMMINISTRATORE* 🔧
 
 *Gestione Sistema:*
 📊 */admin_status* - Stato dettagliato del sistema
@@ -146,12 +145,20 @@ function formatAdminHelpMessage() {
 📣 */admin_notify_all [messaggio]* - Invia un messaggio a tutti
 
 *Diagnostica:*
-🔍 */admin_dbtest* - Verifica lo stato del database
+🔍 */dbtest* - Verifica lo stato del database
 🔄 */admin_update_commands* - Aggiorna i comandi del bot
-
-*Guida:*
-❓ */admin_help* - Mostra questo messaggio
 `;
+  }
+
+  return message;
+}
+
+/**
+ * Genera un messaggio di aiuto per amministratori
+ * @returns {String} - Messaggio formattato
+ */
+function formatAdminHelpMessage() {
+  return formatHelpMessage(true);
 }
 
 /**
@@ -203,9 +210,9 @@ function formatSessionStartMessage(session) {
 ⏳ Tempo massimo: *30 minuti*
 
 📱 *Cosa fare ora:*
-• Riceverai un promemoria 5 minuti prima della scadenza
-• Quando termini la ricarica, scollega il veicolo
-• Conferma con */terminato* per liberare lo slot
+- Riceverai un promemoria 5 minuti prima della scadenza
+- Quando termini la ricarica, scollega il veicolo
+- Conferma con */terminato* per liberare lo slot
 
 ⚠️ *Importante:* Se non confermi entro il tempo massimo, potresti ricevere notifiche di promemoria.
 `;
@@ -238,13 +245,13 @@ function formatWelcomeMessage(username, userId) {
   return `
 👋 *Benvenuto a Green-Charge, @${username}!*
 
-Questo bot ti aiuta a gestire le colonnine di ricarica in modo semplice e veloce.
+Questo bot gestisce la coda per le colonnine di ricarica in modo semplice e veloce.
 
 📱 *Per iniziare subito:*
 
-• Usa */prenota* per richiedere una colonnina
-• Se tutte sono occupate, verrai messo in coda
-• Riceverai una notifica quando sarà il tuo turno
+- Usa */prenota* per richiedere una colonnina
+- Se tutte sono occupate, verrai messo in coda
+- Riceverai una notifica quando sarà il tuo turno
 
 📊 Per verificare lo stato delle colonnine usa */status*
 ❓ Per maggiori informazioni usa */help*
@@ -267,13 +274,13 @@ function formatQueueMessage(username, userId, position) {
 ✅ @${username}, sei stato aggiunto in coda in posizione *#${position}*.
 
 *Cosa succederà ora:*
-• Quando si libera uno slot, gli utenti vengono avvisati in ordine di coda
-• Riceverai una notifica quando sarà il tuo turno
-• Avrai 5 minuti per iniziare la ricarica, dopo la notifica
+- Quando si libera uno slot, gli utenti vengono avvisati in ordine di coda
+- Riceverai una notifica quando sarà il tuo turno
+- Avrai 5 minuti per iniziare la ricarica, dopo la notifica
 
 *Opzioni disponibili:*
-• Usa */status* per controllare la tua posizione in coda
-• Usa */cancella* se cambi idea e non vuoi più attendere
+- Usa */status* per controllare la tua posizione in coda
+- Usa */cancella* se cambi idea e non vuoi più attendere
 
 Ti ringraziamo per la pazienza! 🙏
 `;
@@ -347,9 +354,9 @@ function formatReminderMessage(username, remainingMinutes, endTime) {
 Ti restano solo *${remainingMinutes} minuti* prima del termine.
 
 *Informazioni:*
-• La ricarica terminerà alle *${formatTime(endTime)}*
-• Prepara il veicolo per essere scollegato
-• Al termine, conferma con */terminato*
+- La ricarica terminerà alle *${formatTime(endTime)}*
+- Prepara il veicolo per essere scollegato
+- Al termine, conferma con */terminato*
 
 Grazie per la collaborazione! Altri utenti potrebbero essere in attesa. 👍
 `;
