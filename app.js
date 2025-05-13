@@ -20,6 +20,12 @@ const INSTANCE_ID = `instance_${Date.now()}_${uuidv4().split('-')[0]}`;
 const localLockManager = new LocalLockManager(INSTANCE_ID);
 const instanceTracker = new InstanceTracker(INSTANCE_ID);
 
+// Variabili per gestire il backoff e i tentativi di connessione
+let pollingRetryCount = 0;
+const MAX_RETRY_COUNT = 5;
+const MIN_INITIAL_DELAY = 20000; // 20 secondi
+const MAX_INITIAL_DELAY = 40000; // 40 secondi
+
 let bot = null;
 let masterLockHeartbeatInterval = null;
 let executionLockHeartbeatInterval = null;
@@ -99,6 +105,25 @@ mongoose.connect(config.MONGODB_URI, mongooseOptions)
   });
 
 /**
+ * Verifica se è possibile connettersi a Telegram senza conflitti
+ * @returns {Promise<boolean>} - true se la connessione è riuscita
+ */
+async function testTelegramConnection() {
+  try {
+    const testBot = new TelegramBot(config.BOT_TOKEN, { polling: false });
+    await testBot.getMe();
+    return true;
+  } catch (error) {
+    if (error.code === 'ETELEGRAM' && error.message && error.message.includes('409 Conflict')) {
+      logger.warn('Conflitto Telegram rilevato durante il test di connessione');
+      return false;
+    }
+    logger.error('Errore durante il test di connessione a Telegram:', error);
+    return false;
+  }
+}
+
+/**
  * Avvia la sequenza di inizializzazione del bot
  */
 async function initializeBot() {
@@ -107,8 +132,8 @@ async function initializeBot() {
     await Lock.deleteMany({ instance_id: INSTANCE_ID });
     
     // Attendi un periodo casuale prima di tentare di acquisire il master lock
-    // Questo aiuta a prevenire race condition durante i deploy multipli
-    const delayMs = 10000 + Math.floor(Math.random() * 15000); // tra 10 e 25 secondi
+    // Aumenta il ritardo per ridurre i conflitti durante i deploy
+    const delayMs = MIN_INITIAL_DELAY + Math.floor(Math.random() * (MAX_INITIAL_DELAY - MIN_INITIAL_DELAY));
     logger.info(`Attesa di ${delayMs}ms prima di tentare di acquisire il master lock...`);
     await new Promise(resolve => setTimeout(resolve, delayMs));
     
@@ -130,6 +155,16 @@ async function acquireMasterLock() {
   
   try {
     logger.info(`Tentativo di acquisire il master lock per l'istanza ${INSTANCE_ID}...`);
+    
+    // Prima verifica se possiamo connetterci a Telegram senza conflitti
+    const canConnectToTelegram = await testTelegramConnection();
+    if (!canConnectToTelegram) {
+      logger.warn('Test di connessione a Telegram fallito, attesa prima di riprovare...');
+      setTimeout(() => {
+        if (!isShuttingDown) acquireMasterLock();
+      }, 15000 + Math.random() * 10000); // Attesa più lunga in caso di conflitto rilevato
+      return;
+    }
     
     // Verifica se c'è già un'istanza attiva con un lock di esecuzione
     const activeLock = await Lock.findOne({ 
@@ -217,6 +252,16 @@ async function acquireExecutionLock() {
   
   try {
     logger.info(`Tentativo di acquisire il lock di esecuzione per l'istanza ${INSTANCE_ID}...`);
+    
+    // Prima verifica se possiamo connetterci a Telegram senza conflitti
+    const canConnectToTelegram = await testTelegramConnection();
+    if (!canConnectToTelegram) {
+      logger.warn('Test di connessione a Telegram fallito prima di acquisire execution lock, attesa prima di riprovare...');
+      setTimeout(() => {
+        if (!isShuttingDown) acquireExecutionLock();
+      }, 10000 + Math.random() * 5000);
+      return;
+    }
     
     // Verifica se esiste già un lock di esecuzione valido
     const executionLock = await Lock.findOne({ 
@@ -503,19 +548,48 @@ function startBot() {
     bot.on('polling_error', (error) => {
       logger.error('❌ Errore di polling Telegram:', error);
       
-      // Se l'errore è un conflitto (409), rilasciamo il lock e terminiamo l'istanza
+      // Se l'errore è un conflitto (409), implementa un backoff esponenziale
       if (error.code === 'ETELEGRAM' && error.message && error.message.includes('409 Conflict')) {
-        logger.warn('Rilevato conflitto con altra istanza Telegram, terminazione...');
+        logger.warn('Rilevato conflitto con altra istanza Telegram, gestione...');
+        pollingRetryCount++;
         
-        // Immediato arresto del polling per evitare ulteriori errori
+        // Se abbiamo troppi tentativi falliti, meglio terminare
+        if (pollingRetryCount > MAX_RETRY_COUNT) {
+          logger.warn(`Troppi tentativi falliti (${pollingRetryCount}), terminazione...`);
+          
+          // Immediato arresto del polling per evitare ulteriori errori
+          try {
+            bot.stopPolling();
+          } catch (err) {
+            logger.error('Errore nell\'arresto del polling:', err);
+          }
+          
+          // Termina l'istanza
+          performShutdown('TELEGRAM_CONFLICT');
+          return;
+        }
+        
+        // Calcola il tempo di backoff esponenziale (tra 2 e 30 secondi)
+        const backoffTime = Math.min(1000 * Math.pow(2, pollingRetryCount) + Math.random() * 1000, 30000);
+        logger.info(`Attesa di ${Math.round(backoffTime/1000)} secondi prima di riprovare (tentativo ${pollingRetryCount})...`);
+        
+        // Ferma il polling attuale
         try {
           bot.stopPolling();
+          bot = null;
         } catch (err) {
           logger.error('Errore nell\'arresto del polling:', err);
         }
         
-        // Termina l'istanza
-        performShutdown('TELEGRAM_CONFLICT');
+        // Riprova dopo il backoff
+        setTimeout(() => {
+          if (!isShuttingDown) {
+            logger.info(`Tentativo di riconnessione #${pollingRetryCount}...`);
+            startBot(); // Riavvia il bot
+          }
+        }, backoffTime);
+        
+        return;
       }
     });
     
@@ -696,10 +770,8 @@ async function performShutdown(reason = 'NORMAL') {
       lockCheckInterval = null;
     }
     
-    // Rilascia tutti i lock
-    await releaseAllLocks();
-    
-    // Ferma il polling del bot
+    // Ferma il polling del bot PRIMA di rilasciare i lock
+    // Questo è importante per evitare conflitti
     if (bot) {
       logger.info('Arresto polling Telegram...');
       try {
@@ -709,6 +781,12 @@ async function performShutdown(reason = 'NORMAL') {
         logger.error('Errore durante l\'arresto del polling:', error);
       }
     }
+    
+    // Ora rilascia i lock
+    await releaseAllLocks();
+    
+    // Resetta il contatore dei retry
+    pollingRetryCount = 0;
     
     // Registra informazioni sull'istanza
     logger.info(`L'istanza ha tentato ${instanceTracker.restartCount} riavvii durante il ciclo di vita`);
