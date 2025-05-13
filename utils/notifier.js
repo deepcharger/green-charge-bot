@@ -2,12 +2,11 @@ const Session = require('../models/session');
 const System = require('../models/system');
 const Queue = require('../models/queue');
 const User = require('../models/user');
-const userHandler = require('../handlers/userHandler');
-const queueHandler = require('../handlers/queueHandler');
 const config = require('../config');
 const moment = require('moment');
 const logger = require('../utils/logger');
 const mongoose = require('mongoose');
+const queueHandler = require('../handlers/queueHandler');
 
 // Riferimenti ai timer attivi
 let reminderTimer = null;
@@ -18,11 +17,9 @@ let queueTimeoutTimer = null;
 /**
  * Avvia il sistema di notifiche periodiche
  * @param {Object} bot - Istanza del bot Telegram
- * @param {Function} executeWithLock - Funzione per eseguire operazioni con lock
- * @param {Function} isActiveInstance - Funzione per verificare se siamo l'istanza attiva
  * @returns {Object} - Riferimenti ai timer avviati
  */
-function startNotificationSystem(bot, executeWithLock, isActiveInstance) {
+function startNotificationSystem(bot) {
   if (!bot) {
     logger.error('Impossibile avviare il sistema di notifiche: bot non fornito');
     return null;
@@ -40,23 +37,7 @@ function startNotificationSystem(bot, executeWithLock, isActiveInstance) {
         return;
       }
       
-      // Verifica se siamo l'istanza attiva
-      if (isActiveInstance && typeof isActiveInstance === 'function') {
-        const active = await isActiveInstance();
-        if (!active) {
-          logger.debug('Non siamo l\'istanza attiva, salto il controllo delle sessioni in scadenza');
-          return;
-        }
-      }
-      
-      // Esegui l'operazione con lock
-      if (executeWithLock && typeof executeWithLock === 'function') {
-        await executeWithLock('check_expiring_sessions', async () => {
-          await checkExpiringSessions(bot);
-        }, 30000); // Timeout di 30 secondi
-      } else {
-        await checkExpiringSessions(bot);
-      }
+      await checkExpiringSessions(bot);
     } catch (error) {
       logger.error('Errore durante il controllo delle sessioni in scadenza:', error);
     }
@@ -71,23 +52,7 @@ function startNotificationSystem(bot, executeWithLock, isActiveInstance) {
         return;
       }
       
-      // Verifica se siamo l'istanza attiva
-      if (isActiveInstance && typeof isActiveInstance === 'function') {
-        const active = await isActiveInstance();
-        if (!active) {
-          logger.debug('Non siamo l\'istanza attiva, salto il controllo delle sessioni scadute');
-          return;
-        }
-      }
-      
-      // Esegui l'operazione con lock
-      if (executeWithLock && typeof executeWithLock === 'function') {
-        await executeWithLock('check_expired_sessions', async () => {
-          await checkExpiredSessions(bot);
-        }, 30000); // Timeout di 30 secondi
-      } else {
-        await checkExpiredSessions(bot);
-      }
+      await checkExpiredSessions(bot);
     } catch (error) {
       logger.error('Errore durante il controllo delle sessioni scadute:', error);
     }
@@ -102,23 +67,7 @@ function startNotificationSystem(bot, executeWithLock, isActiveInstance) {
         return;
       }
       
-      // Verifica se siamo l'istanza attiva
-      if (isActiveInstance && typeof isActiveInstance === 'function') {
-        const active = await isActiveInstance();
-        if (!active) {
-          logger.debug('Non siamo l\'istanza attiva, salto il controllo delle sessioni in ritardo');
-          return;
-        }
-      }
-      
-      // Esegui l'operazione con lock
-      if (executeWithLock && typeof executeWithLock === 'function') {
-        await executeWithLock('check_overdue_sessions', async () => {
-          await checkOverdueSessions(bot);
-        }, 30000); // Timeout di 30 secondi
-      } else {
-        await checkOverdueSessions(bot);
-      }
+      await checkOverdueSessions(bot);
     } catch (error) {
       logger.error('Errore durante il controllo delle sessioni in ritardo:', error);
     }
@@ -133,23 +82,7 @@ function startNotificationSystem(bot, executeWithLock, isActiveInstance) {
         return;
       }
       
-      // Verifica se siamo l'istanza attiva
-      if (isActiveInstance && typeof isActiveInstance === 'function') {
-        const active = await isActiveInstance();
-        if (!active) {
-          logger.debug('Non siamo l\'istanza attiva, salto il controllo dei timeout della coda');
-          return;
-        }
-      }
-      
-      // Esegui l'operazione con lock
-      if (executeWithLock && typeof executeWithLock === 'function') {
-        await executeWithLock('check_queue_timeouts', async () => {
-          await queueHandler.checkQueueTimeouts(bot);
-        }, 30000); // Timeout di 30 secondi
-      } else {
-        await queueHandler.checkQueueTimeouts(bot);
-      }
+      await queueHandler.checkQueueTimeouts(bot);
     } catch (error) {
       logger.error('Errore durante il controllo dei timeout della coda:', error);
     }
