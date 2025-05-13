@@ -6,5 +6,4 @@ services:
     buildCommand: npm install
     startCommand: node app.js
     healthCheckPath: /
-    gracePeriodSeconds: 60
-    autoDeploy: true
+    gracePeriodSeconds: 120
