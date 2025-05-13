@@ -32,4 +32,8 @@ const userSchema = new mongoose.Schema({
   }
 }, { timestamps: true });
 
+// Indici per migliorare le prestazioni
+userSchema.index({ username: 1 });
+userSchema.index({ last_charge: -1 });
+
 module.exports = mongoose.model('User', userSchema);
