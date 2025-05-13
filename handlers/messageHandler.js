@@ -374,7 +374,12 @@ function init(bot) {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
     
-    logger.info(`Received /admin_${match[1]} command from user ${userId}`);
+    // Estrai il comando base e i parametri
+    const fullCommand = match[1];
+    const commandParts = fullCommand.split(' ');
+    const command = commandParts[0]; // Solo la prima parte è il comando effettivo
+    
+    logger.info(`Received /admin_${command} command from user ${userId}`);
     
     // Verifica che l'utente sia admin
     if (userId !== config.ADMIN_USER_ID) {
@@ -382,8 +387,6 @@ function init(bot) {
       bot.sendMessage(chatId, '🚫 Comando riservato agli amministratori.');
       return;
     }
-    
-    const command = match[1];
     
     try {
       // Gestisci i comandi admin
@@ -399,7 +402,7 @@ function init(bot) {
         bot.sendMessage(chatId, '✅ Comandi del bot aggiornati con successo!');
       } else if (command === 'set_charge_time') {
         // Comando per impostare il tempo massimo di ricarica
-        const params = msg.text.split(' ').slice(1);
+        const params = commandParts.slice(1);
         if (params.length < 1 || isNaN(parseInt(params[0]))) {
           bot.sendMessage(chatId, '❌ Uso: /admin_set_charge_time [minuti]');
           return;
@@ -422,7 +425,7 @@ function init(bot) {
         bot.sendMessage(chatId, `✅ Tempo massimo di ricarica impostato a ${minutes} minuti.`);
       } else if (command === 'set_reminder_time') {
         // Comando per impostare il tempo di promemoria
-        const params = msg.text.split(' ').slice(1);
+        const params = commandParts.slice(1);
         if (params.length < 1 || isNaN(parseInt(params[0]))) {
           bot.sendMessage(chatId, '❌ Uso: /admin_set_reminder_time [minuti]');
           return;
@@ -443,6 +446,37 @@ function init(bot) {
         }
         
         bot.sendMessage(chatId, `✅ Tempo di promemoria impostato a ${minutes} minuti.`);
+      } else if (command === 'set_max_slots') {
+        // Gestisci il comando set_max_slots direttamente qui
+        const params = commandParts.slice(1);
+        if (params.length < 1 || isNaN(parseInt(params[0]))) {
+          bot.sendMessage(chatId, '❌ Uso: /admin_set_max_slots [numero]');
+          return;
+        }
+        
+        const maxSlots = parseInt(params[0]);
+        logger.info(`Admin setting max slots to ${maxSlots}`);
+        
+        try {
+          // Usa direttamente la funzione di queueHandler
+          const system = await queueHandler.updateMaxSlots(maxSlots);
+          
+          // Notifica l'admin
+          bot.sendMessage(chatId, 
+            `✅ Numero massimo di slot aggiornato a *${maxSlots}*.\n\n` +
+            `ℹ️ Stato attuale: *${system.slots_available}* slot disponibili.`,
+            { parse_mode: 'Markdown' });
+          
+          // Se sono stati aggiunti nuovi slot disponibili, notifica gli utenti in coda
+          if (system.slots_available > 0) {
+            await queueHandler.notifyNextInQueue(bot);
+          }
+          
+          logger.info(`Max slots updated to ${maxSlots}, available: ${system.slots_available}`);
+        } catch (error) {
+          logger.error(`Error updating max slots to ${maxSlots}:`, error);
+          bot.sendMessage(chatId, `❌ Errore durante l'aggiornamento del numero massimo di slot: ${error.message}`);
+        }
       } else {
         // Altri comandi admin
         await adminHandler.handleAdminCommand(bot, chatId, userId, command, msg.text);
