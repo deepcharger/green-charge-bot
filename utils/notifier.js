@@ -53,7 +53,7 @@ function startNotificationSystem(bot, executeWithLock, isActiveInstance) {
       if (executeWithLock && typeof executeWithLock === 'function') {
         await executeWithLock('check_expiring_sessions', async () => {
           await checkExpiringSessions(bot);
-        });
+        }, 30000); // Timeout di 30 secondi
       } else {
         await checkExpiringSessions(bot);
       }
@@ -84,7 +84,7 @@ function startNotificationSystem(bot, executeWithLock, isActiveInstance) {
       if (executeWithLock && typeof executeWithLock === 'function') {
         await executeWithLock('check_expired_sessions', async () => {
           await checkExpiredSessions(bot);
-        });
+        }, 30000); // Timeout di 30 secondi
       } else {
         await checkExpiredSessions(bot);
       }
@@ -115,7 +115,7 @@ function startNotificationSystem(bot, executeWithLock, isActiveInstance) {
       if (executeWithLock && typeof executeWithLock === 'function') {
         await executeWithLock('check_overdue_sessions', async () => {
           await checkOverdueSessions(bot);
-        });
+        }, 30000); // Timeout di 30 secondi
       } else {
         await checkOverdueSessions(bot);
       }
@@ -146,7 +146,7 @@ function startNotificationSystem(bot, executeWithLock, isActiveInstance) {
       if (executeWithLock && typeof executeWithLock === 'function') {
         await executeWithLock('check_queue_timeouts', async () => {
           await queueHandler.checkQueueTimeouts(bot);
-        });
+        }, 30000); // Timeout di 30 secondi
       } else {
         await queueHandler.checkQueueTimeouts(bot);
       }
