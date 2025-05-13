@@ -67,9 +67,10 @@ const mongooseOptions = {
   heartbeatFrequencyMS: 10000,
   retryWrites: true,
   maxPoolSize: 20,
-  minPoolSize: 5,
-  keepAlive: true,
-  keepAliveInitialDelay: 300000
+  minPoolSize: 5
+  // Opzioni deprecate rimosse:
+  // keepAlive: true,
+  // keepAliveInitialDelay: 300000
 };
 
 // Gestione eventi di MongoDB
