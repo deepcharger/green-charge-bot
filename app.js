@@ -23,7 +23,9 @@ const instanceTracker = new InstanceTracker(INSTANCE_ID);
 
 // Variabili per gestire il backoff e i tentativi di connessione
 let pollingRetryCount = 0;
+let networkErrorCount = 0; // Contatore per gli errori di rete
 const MAX_RETRY_COUNT = 5;
+const MAX_NETWORK_ERROR_COUNT = 5; // Massimo numero di errori di rete consecutivi
 const MIN_INITIAL_DELAY = 20000; // 20 secondi
 const MAX_INITIAL_DELAY = 40000; // 40 secondi
 const GLOBAL_LOCK_TIMEOUT = 60000; // 60 secondi prima che un lock sia considerato stale
@@ -38,6 +40,7 @@ let notificationSystem = null; // Riferimento al sistema di notifiche
 let isBotStarting = false; // Flag per evitare avvii multipli simultanei
 let lastHeartbeatTime = Date.now(); // Timestamp dell'ultimo heartbeat
 let lastOperationId = null; // ID dell'ultima operazione eseguita
+let isPollingRestarting = false; // Flag per evitare riavvii multipli del polling
 
 // Flag per monitorare lo stato della connessione Telegram
 let telegramConflictDetected = false;
@@ -846,6 +849,62 @@ async function releaseAllLocks() {
 }
 
 /**
+ * Funzione per il riavvio "leggero" del polling di Telegram
+ * @returns {Promise<boolean>} - true se il riavvio è stato effettuato con successo
+ */
+async function restartPolling() {
+  // Evita riavvii simultanei
+  if (isPollingRestarting) return false;
+  isPollingRestarting = true;
+  
+  try {
+    logger.info('Tentativo di riavvio leggero del polling Telegram...');
+    
+    if (!bot) {
+      logger.warn('Bot non inizializzato, impossibile riavviare il polling');
+      isPollingRestarting = false;
+      return false;
+    }
+    
+    // Ferma il polling
+    await bot.stopPolling();
+    
+    // Attendi un po' per assicurarsi che il polling sia completamente fermato
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Avvia di nuovo il polling
+    await bot.startPolling();
+    
+    logger.info('Polling Telegram riavviato con successo');
+    isPollingRestarting = false;
+    
+    // Se il riavvio ha successo, diminuisci il contatore degli errori di rete
+    if (networkErrorCount > 0) networkErrorCount--;
+    
+    return true;
+  } catch (error) {
+    logger.error('Errore durante il riavvio leggero del polling:', error);
+    
+    // Riprova con un approccio più drastico
+    try {
+      await stopBot();
+      
+      setTimeout(() => {
+        isPollingRestarting = false;
+        if (!isShuttingDown) {
+          startBot();
+        }
+      }, 5000);
+    } catch (err) {
+      logger.error('Errore anche durante l\'arresto completo del bot:', err);
+      isPollingRestarting = false;
+    }
+    
+    return false;
+  }
+}
+
+/**
  * Funzione per fermare il bot in modo sicuro
  */
 async function stopBot() {
@@ -874,6 +933,9 @@ async function stopBot() {
     
     // Resetta il flag di avvio
     isBotStarting = false;
+    
+    // Resetta il flag di riavvio del polling
+    isPollingRestarting = false;
     
     return true;
   } catch (error) {
@@ -998,8 +1060,47 @@ async function startBotImplementation() {
         });
         
         return;
-      } else if (error.code === 'EFATAL' || error.code === 'EPARSE' || error.code === 'ETELEGRAM') {
-        // Per errori fatali, EPARSE o altri errori di Telegram, attendiamo un po' e ritentiamo
+      } 
+      // Nuova gestione specifica per gli errori di timeout del socket
+      else if (error.code === 'EFATAL' && error.message && 
+               (error.message.includes('ESOCKETTIMEDOUT') || 
+                error.message.includes('ETIMEDOUT') || 
+                error.message.includes('ECONNRESET'))) {
+        
+        logger.warn(`Rilevato errore di connessione ${error.message}, tentativo di ripristino leggero...`);
+        
+        // Incrementa un contatore di errori di rete
+        networkErrorCount = (networkErrorCount || 0) + 1;
+        
+        // Se ci sono troppi errori consecutivi, riavvia completamente
+        if (networkErrorCount > MAX_NETWORK_ERROR_COUNT) {
+          logger.warn(`Troppi errori di rete consecutivi (${networkErrorCount}), riavvio completo del bot...`);
+          stopBot().then(() => {
+            networkErrorCount = 0; // Reset del contatore
+            setTimeout(() => {
+              if (!isShuttingDown) {
+                isBotStarting = false;
+                startBot();
+              }
+            }, 5000);
+          });
+          return;
+        }
+        
+        // Per i primi errori, tenta solo un riavvio "leggero" del polling
+        try {
+          // Piccola pausa per far ripristinare le connessioni di rete
+          setTimeout(async () => {
+            if (bot && !isShuttingDown && !isPollingRestarting) {
+              await restartPolling();
+            }
+          }, 2000);
+        } catch (err) {
+          logger.error('Errore durante la gestione del timeout:', err);
+        }
+      }
+      else if (error.code === 'EFATAL' || error.code === 'EPARSE' || error.code === 'ETELEGRAM') {
+        // Per altri errori fatali, EPARSE o errori di Telegram, attendiamo un po' e ritentiamo
         logger.warn(`Errore ${error.code}, tentatvo di ripartire il bot...`);
         stopBot().then(() => {
           // Attesa prima di riprovare
@@ -1024,6 +1125,9 @@ async function startBotImplementation() {
     // Reset del contatore e del flag di conflitto quando la connessione ha successo
     pollingRetryCount = 0;
     telegramConflictDetected = false;
+    
+    // Reset anche del contatore degli errori di rete
+    networkErrorCount = 0;
     
     // Controlla se è stata inviata una notifica di avvio nelle ultime 2 ore
     const recentlyNotified = await checkLastStartupNotification();
@@ -1194,6 +1298,9 @@ async function performShutdown(reason = 'NORMAL') {
     // Resetta il flag di avvio
     isBotStarting = false;
     
+    // Resetta il contatore degli errori di rete
+    networkErrorCount = 0;
+    
     // Registra informazioni sull'istanza
     logger.info(`L'istanza ha tentato ${instanceTracker.restartCount} riavvii durante il ciclo di vita`);
     
@@ -1259,5 +1366,6 @@ module.exports = {
   acquireTaskLock,
   releaseTaskLock,
   executeWithLock,
-  isActiveInstance
+  isActiveInstance,
+  restartPolling
 };
