@@ -22,12 +22,16 @@ const lockSchema = new mongoose.Schema({
   created_at: {
     type: Date,
     default: Date.now,
-    expires: 300 // TTL di 5 minuti in caso di crash (aumentato per sicurezza)
+    expires: 600 // TTL di 10 minuti in caso di crash (aumentato per sicurezza)
   },
   last_heartbeat: {
     type: Date,
     default: Date.now
   }
 });
+
+// Aggiunge indici per migliorare le prestazioni
+lockSchema.index({ instance_id: 1 });
+lockSchema.index({ lock_type: 1, last_heartbeat: -1 });
 
 module.exports = mongoose.model('Lock', lockSchema);
