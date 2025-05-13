@@ -79,10 +79,10 @@ const mongooseOptions = {
   heartbeatFrequencyMS: 10000, // Heartbeat ogni 10 secondi
   retryWrites: true,
   maxPoolSize: 20, // 20 connessioni massime nel pool
-  minPoolSize: 5,  // 5 connessioni minime nel pool
-  // Imposta la lettura persistente
-  keepAlive: true,
-  keepAliveInitialDelay: 300000 // 5 minuti
+  minPoolSize: 5  // 5 connessioni minime nel pool
+  // Opzioni deprecate rimosse:
+  // keepAlive: true,
+  // keepAliveInitialDelay: 300000 // 5 minuti
 };
 
 // Gestire gli eventi di MongoDB per monitorare la connessione
@@ -1436,7 +1436,7 @@ async function startBotImplementation() {
     
     // Configura gli handler di errore
     setupBotErrorHandlers(bot);
-    
+
     // Test della connessione a Telegram
     logger.info('Verifica connessione a Telegram...');
     const info = await bot.getMe();
