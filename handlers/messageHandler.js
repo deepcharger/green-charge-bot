@@ -65,11 +65,15 @@ function init(bot) {
   // Verifica connessione a Telegram
   try {
     logger.info('Testing Telegram connection...');
-    bot.getMe().then(info => {
+    bot.getMe().then(async info => {  // <-- Modificato: aggiunto async
       logger.info(`Connected to Telegram as @${info.username}`);
       
-      // Imposta i comandi del bot
-      setupBotCommands(bot);
+      // Imposta i comandi del bot e attendi il completamento
+      try {
+        await setupBotCommands(bot);  // <-- Modificato: aggiunto await
+      } catch (err) {
+        logger.error('Error setting up bot commands:', err);
+      }
     }).catch(err => {
       logger.error('Failed to connect to Telegram:', err);
     });
