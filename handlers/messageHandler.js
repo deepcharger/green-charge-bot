@@ -315,7 +315,9 @@ function init(bot) {
         return;
       }
       
-      const message = formatters.formatHelpMessage();
+      // Verifica se l'utente è admin per mostrare i comandi admin
+      const isAdmin = userId === config.ADMIN_USER_ID;
+      const message = formatters.formatHelpMessage(isAdmin);
       
       bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
       logger.info(`Sent help message to user ${userId}`);
@@ -502,6 +504,7 @@ function init(bot) {
  */
 async function setupBotCommands(bot) {
   try {
+    // Imposta i comandi utente (visibili a tutti)
     await bot.setMyCommands([
       { command: 'start', description: 'Avvia il bot' },
       { command: 'prenota', description: 'Prenota uno slot o mettiti in coda' },
@@ -513,12 +516,23 @@ async function setupBotCommands(bot) {
       { command: 'dove_sono', description: 'Mostra ID della chat corrente' }
     ]);
     
-    logger.info('Bot commands updated successfully');
+    logger.info('User commands updated successfully');
     
-    // Imposta anche i comandi admin (visibili solo all'admin)
+    // Imposta i comandi admin (visibili solo all'admin)
     try {
       if (config.ADMIN_USER_ID) {
         await bot.setMyCommands([
+          // Comandi utente visibili anche all'admin
+          { command: 'start', description: 'Avvia il bot' },
+          { command: 'prenota', description: 'Prenota uno slot o mettiti in coda' },
+          { command: 'cancella', description: 'Cancella la tua prenotazione in coda' },
+          { command: 'iniziato', description: 'Conferma l\'inizio della ricarica' },
+          { command: 'terminato', description: 'Conferma la fine della ricarica' },
+          { command: 'status', description: 'Visualizza lo stato attuale del sistema' },
+          { command: 'help', description: 'Mostra tutti i comandi disponibili' },
+          { command: 'dove_sono', description: 'Mostra ID della chat corrente' },
+          
+          // Comandi admin
           { command: 'admin_status', description: 'Stato dettagliato del sistema' },
           { command: 'admin_stats', description: 'Statistiche del sistema' },
           { command: 'admin_set_max_slots', description: 'Imposta il numero massimo di slot' },
@@ -530,8 +544,7 @@ async function setupBotCommands(bot) {
           { command: 'admin_reset_system', description: 'Resetta completamente il sistema' },
           { command: 'admin_help', description: 'Mostra i comandi admin disponibili' },
           { command: 'dbtest', description: 'Verifica lo stato del database' },
-          { command: 'admin_update_commands', description: 'Aggiorna i comandi del bot' },
-          { command: 'dove_sono', description: 'Mostra ID della chat corrente' }
+          { command: 'admin_update_commands', description: 'Aggiorna i comandi del bot' }
         ], { scope: { type: 'chat', chat_id: config.ADMIN_USER_ID } });
         
         logger.info('Admin commands updated successfully');
