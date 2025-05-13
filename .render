@@ -1,0 +1,10 @@
+services:
+  - type: worker
+    name: green-charge-bot
+    env: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: node app.js
+    healthCheckPath: /
+    gracePeriodSeconds: 60
+    autoDeploy: true
