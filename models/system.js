@@ -29,4 +29,7 @@ const systemSchema = new mongoose.Schema({
   }
 }, { timestamps: true });
 
+// Indice per il nome del sistema per recupero rapido
+systemSchema.index({ name: 1 });
+
 module.exports = mongoose.model('System', systemSchema);
