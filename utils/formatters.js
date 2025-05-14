@@ -1,11 +1,17 @@
 /**
- * Formatta un timestamp in formato HH:MM
+ * Formatta un timestamp in formato HH:MM usando il fuso orario italiano (UTC+2)
  * @param {Date|String} timestamp - Timestamp da formattare
  * @returns {String} - Timestamp formattato
  */
 function formatTime(timestamp) {
   const date = new Date(timestamp);
-  return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+  
+  // Converti in fuso orario italiano (UTC+2)
+  // Prende l'ora UTC e aggiunge 2 ore
+  const italianHour = (date.getUTCHours() + 2) % 24;
+  const minutes = date.getUTCMinutes();
+  
+  return `${italianHour.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
 }
 
 /**
